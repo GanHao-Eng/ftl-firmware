@@ -7,7 +7,7 @@
 #ifndef FTL_NAND_H
 #define FTL_NAND_H
 
-#include "common.h"
+#include "common/common.h"
 
 #ifdef __cplusplus
 extern "C" {

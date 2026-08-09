@@ -7,7 +7,7 @@
 #ifndef FTL_FTL_H
 #define FTL_FTL_H
 
-#include "common.h"
+#include "common/common.h"
 #include "nand.h"
 
 #ifdef __cplusplus

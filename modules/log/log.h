@@ -7,7 +7,7 @@
 #ifndef FTL_LOG_H
 #define FTL_LOG_H
 
-#include "common.h"
+#include "common/common.h"
 
 #ifdef __cplusplus
 extern "C" {

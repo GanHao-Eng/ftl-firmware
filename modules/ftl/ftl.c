@@ -68,6 +68,14 @@ typedef struct {
 static ftl_dev_t g_ftl_dev = {0};
 
 /* ============================================================
+ *  内部辅助函数前置声明
+ * ============================================================ */
+
+static inline uint32_t lpn_to_logical_block(uint32_t lpn);
+static void hybrid_update_access_count(uint32_t lpn);
+static ret_code_t wal_log_write(uint32_t lpn, uint32_t old_ppn, uint32_t new_ppn);
+
+/* ============================================================
  *  内部辅助函数
  * ============================================================ */
 
@@ -269,7 +277,6 @@ static bool gc_select_cat(uint32_t *victim_block)
     uint32_t max_erase = 0U;/*最大擦写次数*/
     uint32_t erase_cnt = 0U;/*擦写次数*/
     uint32_t valid_pages = 0U;/*有效页*/
-    uint32_t erase_cnt = 0U;/*擦写次数*/
     double invalid_ratio = 0.0;/*无效页比例*/
     double age_factor = 0.0;/*年龄因子*/
     double score = 0.0;/*CAT分数*/

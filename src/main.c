@@ -9,7 +9,7 @@
 #include <string.h>
 #include "common/common.h"
 #include "msg_queue.h"
-#include "utils/utils.h"
+#include "utils.h"
 #include "log.h"
 #include "nand.h"
 #include "ftl.h"

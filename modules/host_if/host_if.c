@@ -5,6 +5,7 @@
  */
 
 #include "host_if.h"
+#include "ftl.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,30 +144,28 @@ static ret_code_t add_cqe(const nvme_cqe_t *cqe)
  */
 static nvme_status_t process_read_cmd(const nvme_cmd_t *cmd)
 {
-    message_t msg;
-    msg_ftl_req_t *ftl_req = &msg.data.ftl_req;
+    ret_code_t ret = RET_OK;
+    uint32_t lpn = 0;
+    uint32_t count = 0;
 
     if (cmd == NULL) {
         return NVME_STATUS_INVALID_FIELD;
     }
 
-    /* 构造 FTL 读请求消息 */
-    memset(&msg, 0, sizeof(message_t));
-    msg.header.type = MSG_TYPE_FTL_READ;
-    msg.header.priority = MSG_PRIORITY_NORMAL;
-    msg.header.src_module = MODULE_HOST_IF;
-    msg.header.dst_module = MODULE_FTL;
+    /* 计算 LPN 和数量 */
+    lpn = (uint32_t)cmd->slba;
+    count = cmd->nlb + 1;
 
-    cmd_to_ftl_req(cmd, ftl_req);
-
-    /* 发送消息到 FTL 模块 */
-    if (msg_queue_send(&msg) != RET_OK) {
+    /* 直接调用 FTL 读接口（简化实现，不通过消息队列） */
+    ret = ftl_read(lpn, count, cmd->data_buf, cmd->data_len);
+    if (ret != RET_OK) {
         return NVME_STATUS_INTERNAL_ERROR;
     }
 
     /* 更新统计 */
     g_host_if.stats.read_cmds++;
     g_host_if.stats.total_cmds++;
+    g_host_if.stats.total_read_bytes += cmd->data_len;
 
     return NVME_STATUS_SUCCESS;
 }
@@ -178,24 +177,21 @@ static nvme_status_t process_read_cmd(const nvme_cmd_t *cmd)
  */
 static nvme_status_t process_write_cmd(const nvme_cmd_t *cmd)
 {
-    message_t msg;
-    msg_ftl_req_t *ftl_req = &msg.data.ftl_req;
+    ret_code_t ret = RET_OK;
+    uint32_t lpn = 0;
+    uint32_t count = 0;
 
     if (cmd == NULL) {
         return NVME_STATUS_INVALID_FIELD;
     }
 
-    /* 构造 FTL 写请求消息 */
-    memset(&msg, 0, sizeof(message_t));
-    msg.header.type = MSG_TYPE_FTL_WRITE;
-    msg.header.priority = MSG_PRIORITY_NORMAL;
-    msg.header.src_module = MODULE_HOST_IF;
-    msg.header.dst_module = MODULE_FTL;
+    /* 计算 LPN 和数量 */
+    lpn = (uint32_t)cmd->slba;
+    count = cmd->nlb + 1;
 
-    cmd_to_ftl_req(cmd, ftl_req);
-
-    /* 发送消息到 FTL 模块 */
-    if (msg_queue_send(&msg) != RET_OK) {
+    /* 直接调用 FTL 写接口（简化实现，不通过消息队列） */
+    ret = ftl_write(lpn, count, cmd->data_buf, cmd->data_len);
+    if (ret != RET_OK) {
         return NVME_STATUS_INTERNAL_ERROR;
     }
 
@@ -214,24 +210,21 @@ static nvme_status_t process_write_cmd(const nvme_cmd_t *cmd)
  */
 static nvme_status_t process_trim_cmd(const nvme_cmd_t *cmd)
 {
-    message_t msg;
-    msg_ftl_req_t *ftl_req = &msg.data.ftl_req;
+    ret_code_t ret = RET_OK;
+    uint32_t lpn = 0;
+    uint32_t count = 0;
 
     if (cmd == NULL) {
         return NVME_STATUS_INVALID_FIELD;
     }
 
-    /* 构造 FTL TRIM 请求消息 */
-    memset(&msg, 0, sizeof(message_t));
-    msg.header.type = MSG_TYPE_FTL_TRIM;
-    msg.header.priority = MSG_PRIORITY_LOW;
-    msg.header.src_module = MODULE_HOST_IF;
-    msg.header.dst_module = MODULE_FTL;
+    /* 计算 LPN 和数量 */
+    lpn = (uint32_t)cmd->slba;
+    count = cmd->nlb + 1;
 
-    cmd_to_ftl_req(cmd, ftl_req);
-
-    /* 发送消息到 FTL 模块 */
-    if (msg_queue_send(&msg) != RET_OK) {
+    /* 直接调用 FTL TRIM 接口（简化实现，不通过消息队列） */
+    ret = ftl_trim(lpn, count);
+    if (ret != RET_OK) {
         return NVME_STATUS_INTERNAL_ERROR;
     }
 

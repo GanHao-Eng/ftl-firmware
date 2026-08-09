@@ -46,6 +46,12 @@ typedef struct {
  */
 static nand_dev_t g_nand_dev = {0};
 
+/* ============================================================
+ *  内部函数前置声明
+ * ============================================================ */
+
+static uint32_t nand_get_init_bad_ratio(nand_type_t type);
+
 /**
  * @brief 检查块号是否合法且设备已初始化
  * @param[in] block 物理块号

@@ -1,0 +1,35 @@
+# 编译产物
+build/
+*.o
+*.obj
+*.exe
+*.elf
+*.bin
+*.hex
+
+# 模拟介质文件
+nand_disk.bin
+*.bin
+
+# 日志文件
+*.log
+ftl_wal.log
+
+# 调试文件
+*.debug
+*.dSYM/
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# Git 相关
+*.orig
+*.rej

@@ -7,6 +7,7 @@
 #include "host_if.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ============================================================
  *  内部数据结构

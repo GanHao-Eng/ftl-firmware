@@ -6,6 +6,7 @@
 
 #include "host_if.h"
 #include "ftl.h"
+#include "nand.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,7 +95,9 @@ static void destroy_cmd_node(cmd_node_t *node)
  * @brief 将命令转换为 FTL 请求
  * @param[in] cmd NVMe 命令指针
  * @param[out] ftl_req FTL 请求指针
+ * @note 预留函数，用于消息队列模式
  */
+__attribute__((unused))
 static void cmd_to_ftl_req(const nvme_cmd_t *cmd, msg_ftl_req_t *ftl_req)
 {
     if (cmd == NULL || ftl_req == NULL) {
@@ -147,25 +150,30 @@ static nvme_status_t process_read_cmd(const nvme_cmd_t *cmd)
     ret_code_t ret = RET_OK;
     uint32_t lpn = 0;
     uint32_t count = 0;
+    uint32_t i = 0;
+    uint8_t *buf = NULL;
 
     if (cmd == NULL) {
         return NVME_STATUS_INVALID_FIELD;
     }
 
-    /* 计算 LPN 和数量 */
+    /* 计算起始 LPN 和数量 */
     lpn = (uint32_t)cmd->slba;
     count = cmd->nlb + 1;
+    buf = cmd->data_buf;
 
-    /* 直接调用 FTL 读接口（简化实现，不通过消息队列） */
-    ret = ftl_read(lpn, count, cmd->data_buf, cmd->data_len);
-    if (ret != RET_OK) {
-        return NVME_STATUS_INTERNAL_ERROR;
+    /* 循环读取每个页（简化实现，逐页读取） */
+    for (i = 0; i < count; i++) {
+        ret = ftl_read(lpn + i, buf + i * NAND_PAGE_SIZE);
+        if (ret != RET_OK) {
+            return NVME_STATUS_INTERNAL_ERROR;
+        }
     }
 
     /* 更新统计 */
     g_host_if.stats.read_cmds++;
     g_host_if.stats.total_cmds++;
-    g_host_if.stats.total_read_bytes += cmd->data_len;
+    g_host_if.stats.total_read_bytes += count * NAND_PAGE_SIZE;
 
     return NVME_STATUS_SUCCESS;
 }
@@ -180,25 +188,30 @@ static nvme_status_t process_write_cmd(const nvme_cmd_t *cmd)
     ret_code_t ret = RET_OK;
     uint32_t lpn = 0;
     uint32_t count = 0;
+    uint32_t i = 0;
+    const uint8_t *buf = NULL;
 
     if (cmd == NULL) {
         return NVME_STATUS_INVALID_FIELD;
     }
 
-    /* 计算 LPN 和数量 */
+    /* 计算起始 LPN 和数量 */
     lpn = (uint32_t)cmd->slba;
     count = cmd->nlb + 1;
+    buf = cmd->data_buf;
 
-    /* 直接调用 FTL 写接口（简化实现，不通过消息队列） */
-    ret = ftl_write(lpn, count, cmd->data_buf, cmd->data_len);
-    if (ret != RET_OK) {
-        return NVME_STATUS_INTERNAL_ERROR;
+    /* 循环写入每个页（简化实现，逐页写入） */
+    for (i = 0; i < count; i++) {
+        ret = ftl_write(lpn + i, buf + i * NAND_PAGE_SIZE);
+        if (ret != RET_OK) {
+            return NVME_STATUS_INTERNAL_ERROR;
+        }
     }
 
     /* 更新统计 */
     g_host_if.stats.write_cmds++;
     g_host_if.stats.total_cmds++;
-    g_host_if.stats.total_write_bytes += cmd->data_len;
+    g_host_if.stats.total_write_bytes += count * NAND_PAGE_SIZE;
 
     return NVME_STATUS_SUCCESS;
 }

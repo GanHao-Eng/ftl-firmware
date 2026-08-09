@@ -157,7 +157,6 @@ static void process_error_report(module_id_t module_id, uint32_t error_code, con
 static void process_health_check(void)
 {
     uint32_t i = 0;
-    uint64_t now = get_timestamp_ms();
 
     for (i = 0; i < MODULE_MAX; i++) {
         if (g_manager.modules[i].state == MODULE_STATE_UNINIT) {

@@ -333,6 +333,10 @@ int main(int argc, char *argv[])
     ret_code_t ret = RET_OK;
     int result = 0;
 
+    /* 消除未使用参数警告 */
+    (void)argc;
+    (void)argv;
+
     /* 打印版本信息 */
     utils_print_version();
     printf("\n");

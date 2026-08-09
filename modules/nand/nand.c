@@ -1063,6 +1063,10 @@ uint32_t nand_get_crc_error_count(void)
  *  ECC 纠错实现（汉明码）
  * ============================================================ */
 
+/* 以下为完整的 ECC 算法实现，当前使用简化版接口，暂未调用 */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+
 /**
  * @brief 计算 4 位数据的 (7,4) 汉明码
  * @param[in] data 4 位数据
@@ -1189,7 +1193,6 @@ ret_code_t nand_ecc_hamming_encode(const uint8_t *data, uint32_t len, uint32_t *
  */
 ecc_result_t nand_ecc_hamming_decode(uint8_t *data, uint32_t len, uint32_t ecc)
 {
-    uint32_t i = 0;
     uint32_t calculated_ecc = 0;
     uint32_t error_bits = 0;
     uint32_t diff = 0;
@@ -1378,16 +1381,8 @@ static uint8_t bch_decode_15bit(uint16_t *codeword)
             }
         }
     } else {
-        /* 2 位错误：使用 Peterson 算法 */
-        uint8_t s2 = gf_pow(s1, 2);  /* S2 = S1^2 */
-        uint8_t s4 = gf_pow(s2, 2);  /* S4 = S2^2 */
-
-        /* 错误定位多项式系数：σ1, σ2 */
-        uint8_t sigma1 = s1;
-        uint8_t sigma2 = gf_mul(s1, s1) ^ s3;
-        sigma2 = gf_mul(sigma2, gf_pow(s1, 15 - 3));  /* 除以 S1 */
-
-        /* 简化：直接尝试所有可能的 2 位错误组合 */
+        /* 2 位错误：使用暴力搜索法定位错误位置 */
+        /* 简化实现：直接尝试所有可能的 2 位错误组合 */
         error_count = 2;
         bool found = false;
         uint8_t j = 0;
@@ -1798,6 +1793,8 @@ ecc_result_t nand_ecc_ldpc_decode(uint8_t *data, uint32_t len, uint32_t ecc)
         return ECC_RESULT_UNCORRECTABLE;
     }
 }
+
+#pragma GCC diagnostic pop
 #endif /* NAND_ENABLE_ECC */
 
 /* ============================================================

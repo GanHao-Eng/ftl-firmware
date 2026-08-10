@@ -550,14 +550,17 @@ ret_code_t thread_join(uint32_t thread_id, void **retval)
         return RET_ERR_PARAM;
     }
 
-    if (thread->state != THREAD_STATE_RUNNING) {
+    /* 如果线程已经停止，直接返回 */
+    if (thread->state == THREAD_STATE_STOPPED ||
+        thread->state == THREAD_STATE_ERROR) {
         if (retval != NULL) {
             *retval = thread->retval;
         }
         return RET_OK;
     }
 
-    /* 等待线程结束 */
+    /* 如果线程还没开始（READY状态），等待线程启动并完成 */
+    /* 直接调用 pthread_join，它会等待线程结束 */
     pthread_join(thread->pthread, retval);
     thread->state = THREAD_STATE_STOPPED;
 

@@ -437,6 +437,9 @@ static int run_thread_test(void)
 static void dma_test_callback(uint32_t channel, bool success,
                               uint32_t transferred, void *user_data)
 {
+    /* 消除未使用参数警告 */
+    (void)user_data;
+
     printf("[DMA测试] 回调: 通道=%u, 成功=%s, 已传输=%u 字节\n",
            channel, success ? "是" : "否", transferred);
 }

@@ -775,7 +775,7 @@ ret_code_t manager_get_thermal_state(thermal_state_t *state)
 temp_state_t manager_get_temp_state(void)
 {
     if (!g_manager.is_initialized) {
-        return TEMP_STATE_UNKNOWN;
+        return TEMP_STATE_NORMAL;
     }
 
     return g_manager.thermal.state;

@@ -1820,7 +1820,6 @@ ret_code_t ftl_trim(uint32_t lpn, uint32_t count)
  */
 static void generate_erase_pattern(uint8_t *buf, uint32_t size, uint32_t pass)
 {
-    uint32_t i = 0;
     uint8_t pattern = 0;
 
     if (buf == NULL || size == 0) {

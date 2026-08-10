@@ -521,8 +521,6 @@ ret_code_t host_if_process(void)
     cmd_node_t *node = NULL;
     nvme_cqe_t cqe;
     nvme_status_t status = NVME_STATUS_SUCCESS;
-    uint64_t start_time = 0;
-    uint64_t end_time = 0;
     uint64_t latency_us = 0;
     uint32_t page_count = 0;
     uint32_t bytes = 0;
@@ -542,9 +540,6 @@ ret_code_t host_if_process(void)
         if (g_host_if.sq_head == NULL) {
             g_host_if.sq_tail = NULL;
         }
-
-        /* 记录开始时间 */
-        start_time = get_timestamp_ms();
 
         /* 根据命令类型处理 */
         switch (node->cmd.opcode) {
@@ -580,9 +575,7 @@ ret_code_t host_if_process(void)
             break;
         }
 
-        /* 记录结束时间，计算延迟 */
-        end_time = get_timestamp_ms();
-        /* 简化延迟计算：基础延迟 + 每页延迟（模拟硬件延迟） */
+        /* 计算延迟（简化模拟：基础延迟 + 每页延迟） */
         page_count = node->cmd.nlb + 1;
         latency_us = 10 + page_count * 5;  /* 基础10us + 每页5us */
         bytes = page_count * NAND_PAGE_SIZE;

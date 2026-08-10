@@ -220,6 +220,8 @@ static nvme_status_t process_write_cmd(const nvme_cmd_t *cmd)
  * @brief 处理 TRIM 命令
  * @param[in] cmd 命令指针
  * @return 状态码
+ * @note Dataset Management 命令，用于标记不再使用的数据块
+ *       对应 NVMe 的 Deallocate 操作
  */
 static nvme_status_t process_trim_cmd(const nvme_cmd_t *cmd)
 {
@@ -244,6 +246,55 @@ static nvme_status_t process_trim_cmd(const nvme_cmd_t *cmd)
     /* 更新统计 */
     g_host_if.stats.trim_cmds++;
     g_host_if.stats.total_cmds++;
+
+    return NVME_STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 Write Zeroes 命令
+ * @param[in] cmd 命令指针
+ * @return 状态码
+ * @note 将指定范围的逻辑块写入全零数据
+ *       与 TRIM 不同，Write Zeroes 实际写入数据，TRIM 只是标记无效
+ */
+static nvme_status_t process_write_zeroes_cmd(const nvme_cmd_t *cmd)
+{
+    ret_code_t ret = RET_OK;
+    uint32_t lpn = 0;
+    uint32_t count = 0;
+    uint32_t i = 0;
+    uint8_t *zero_buf = NULL;
+
+    if (cmd == NULL) {
+        return NVME_STATUS_INVALID_FIELD;
+    }
+
+    /* 计算起始 LPN 和数量 */
+    lpn = (uint32_t)cmd->slba;
+    count = cmd->nlb + 1;
+
+    /* 分配零缓冲区 */
+    zero_buf = (uint8_t *)calloc(NAND_PAGE_SIZE, sizeof(uint8_t));
+    if (zero_buf == NULL) {
+        return NVME_STATUS_INTERNAL_ERROR;
+    }
+
+    /* 循环写入每个页（全零数据） */
+    for (i = 0; i < count; i++) {
+        ret = ftl_write(lpn + i, zero_buf);
+        if (ret != RET_OK) {
+            free(zero_buf);
+            return NVME_STATUS_INTERNAL_ERROR;
+        }
+    }
+
+    /* 释放缓冲区 */
+    free(zero_buf);
+
+    /* 更新统计 */
+    g_host_if.stats.write_cmds++;
+    g_host_if.stats.total_cmds++;
+    g_host_if.stats.total_write_bytes += count * NAND_PAGE_SIZE;
 
     return NVME_STATUS_SUCCESS;
 }
@@ -417,12 +468,16 @@ ret_code_t host_if_process(void)
             status = process_write_cmd(&node->cmd);
             break;
 
+        case NVME_CMD_WRITE_ZEROES:
+            status = process_write_zeroes_cmd(&node->cmd);
+            break;
+
         case NVME_CMD_DATASET_MGMT:
             status = process_trim_cmd(&node->cmd);
             break;
 
         case NVME_CMD_FLUSH:
-            /* Flush 命令简化处理 */
+            /* Flush 命令简化处理：确保数据持久化 */
             status = NVME_STATUS_SUCCESS;
             break;
 

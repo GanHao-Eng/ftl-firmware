@@ -48,16 +48,35 @@ static uint64_t get_timestamp_ms(void)
  * @brief 检查模块健康状态
  * @param[in] module_id 模块ID
  * @return 健康状态
+ * @note 根据错误计数和心跳状态综合判断健康状态
+ *       - 0 错误 = 健康
+ *       - 错误数 < 阈值 = 警告
+ *       - 错误数 >= 阈值 或 心跳超时 = 严重
  */
 static health_status_t check_module_health(module_id_t module_id)
 {
     module_info_t *info = NULL;
+    uint64_t now = 0;
+    uint64_t heartbeat_age = 0;
 
     if (module_id >= MODULE_MAX) {
         return HEALTH_STATUS_UNKNOWN;
     }
 
     info = &g_manager.modules[module_id];
+    now = get_timestamp_ms();
+
+    /* 计算心跳年龄（距上次心跳的时间） */
+    if (info->last_heartbeat_ms <= now) {
+        heartbeat_age = now - info->last_heartbeat_ms;
+    } else {
+        heartbeat_age = 0;
+    }
+
+    /* 心跳超时，直接判定为严重 */
+    if (heartbeat_age > g_manager.config.watchdog_timeout_ms) {
+        return HEALTH_STATUS_CRITICAL;
+    }
 
     /* 根据错误计数判断健康状态 */
     if (info->error_count == 0U) {
@@ -153,23 +172,50 @@ static void process_error_report(module_id_t module_id, uint32_t error_code, con
 
 /**
  * @brief 处理健康检查
+ * @details 执行周期性健康检查，包括：
+ *          - 更新模块运行时间
+ *          - 更新消息队列长度
+ *          - 检测心跳超时（看门狗）
+ *          - 更新整体健康状态
+ *          - 更新总运行时间
  */
 static void process_health_check(void)
 {
     uint32_t i = 0;
+    uint64_t now = 0;
+    uint64_t heartbeat_age = 0;
 
+    now = get_timestamp_ms();
+
+    /* 遍历所有已初始化的模块 */
     for (i = 0; i < MODULE_MAX; i++) {
         if (g_manager.modules[i].state == MODULE_STATE_UNINIT) {
             continue;
         }
 
-        /* 更新运行时间 */
+        /* 更新运行时间（仅对运行中的模块） */
         if (g_manager.modules[i].state == MODULE_STATE_RUNNING) {
             g_manager.modules[i].uptime_ms++;
         }
 
         /* 更新消息队列长度 */
         g_manager.modules[i].msg_queue_count = msg_queue_get_count((module_id_t)i);
+
+        /* 看门狗检测：检查心跳是否超时 */
+        if (g_manager.modules[i].state == MODULE_STATE_RUNNING) {
+            /* 计算心跳年龄 */
+            if (g_manager.modules[i].last_heartbeat_ms <= now) {
+                heartbeat_age = now - g_manager.modules[i].last_heartbeat_ms;
+            } else {
+                heartbeat_age = 0;
+            }
+
+            /* 心跳超时，触发错误 */
+            if (heartbeat_age > g_manager.config.watchdog_timeout_ms) {
+                printf("[管理模块] 模块 %u 心跳超时，触发错误\n", i);
+                process_error_report((module_id_t)i, 0xFF, "心跳超时");
+            }
+        }
     }
 
     /* 更新整体健康状态 */
@@ -182,7 +228,6 @@ static void process_health_check(void)
 /* ============================================================
  *  接口实现
  * ============================================================ */
-
 ret_code_t manager_init(const firmware_config_t *config)
 {
     uint32_t i = 0;
@@ -496,6 +541,13 @@ void manager_print_module_status(void)
     uint32_t i = 0;
     const char *state_str[] = {"未初始化", "初始化中", "就绪", "运行中", "错误", "复位中"};
     const char *health_str[] = {"未知", "健康", "警告", "严重"};
+    const char *module_names[] = {
+        "NAND模块",
+        "FTL模块",
+        "主机接口",
+        "管理模块",
+        "日志模块"
+    };
 
     if (!g_manager.is_initialized) {
         printf("管理模块未初始化\n");
@@ -511,8 +563,8 @@ void manager_print_module_status(void)
             continue;
         }
 
-        printf("  %-12u %-10s %-10s %-8u %-8u\n",
-               i,
+        printf("  %-12s %-10s %-10s %-8u %-8u\n",
+               module_names[i],
                state_str[g_manager.modules[i].state],
                health_str[g_manager.modules[i].health],
                g_manager.modules[i].error_count,

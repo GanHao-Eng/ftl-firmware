@@ -102,6 +102,21 @@ ret_code_t nand_init(const char *file_path)
         return RET_ERR_PARAM;
     }
 
+     /* 初始化统计计数器 */
+    g_nand_dev.total_read_pages = 0;
+    g_nand_dev.total_write_pages = 0;
+    g_nand_dev.crc_error_count = 0;
+#ifdef NAND_ENABLE_ECC
+    g_nand_dev.ecc_corrected_count = 0;
+    g_nand_dev.ecc_uncorrectable_count = 0;
+    g_nand_dev.ecc_algo = NAND_DEFAULT_ECC_ALGO;
+#endif /* NAND_ENABLE_ECC */
+    g_nand_dev.read_energy = 0;
+    g_nand_dev.write_energy = 0;
+    g_nand_dev.erase_energy = 0;
+    g_nand_dev.nand_type = NAND_TYPE_TLC;  /* 默认使用 TLC 颗粒 */
+    
+
     /* 获取当前颗粒类型的参数 */
     init_bad_ratio = nand_get_init_bad_ratio(g_nand_dev.nand_type);
 
@@ -149,21 +164,7 @@ ret_code_t nand_init(const char *file_path)
         }
     }
 
-    /* 初始化统计计数器 */
-    g_nand_dev.total_read_pages = 0;
-    g_nand_dev.total_write_pages = 0;
-    g_nand_dev.crc_error_count = 0;
-#ifdef NAND_ENABLE_ECC
-    g_nand_dev.ecc_corrected_count = 0;
-    g_nand_dev.ecc_uncorrectable_count = 0;
-    g_nand_dev.ecc_algo = NAND_DEFAULT_ECC_ALGO;
-#endif /* NAND_ENABLE_ECC */
-    g_nand_dev.read_energy = 0;
-    g_nand_dev.write_energy = 0;
-    g_nand_dev.erase_energy = 0;
-    g_nand_dev.nand_type = NAND_TYPE_TLC;  /* 默认使用 TLC 颗粒 */
     g_nand_dev.is_initialized = true;
-
     LOG_INFO("NAND 初始化完成: 总块数=%u, 初始坏块=%u, 颗粒类型=%u",
              NAND_TOTAL_BLOCKS, init_bad_count, g_nand_dev.nand_type);
 

@@ -5,8 +5,7 @@
  *          提供线程创建、销毁、同步等功能，模拟固件中的多任务调度
  */
 
-#define _POSIX_C_SOURCE 199309L
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 
 #include "thread.h"
 #include <pthread.h>

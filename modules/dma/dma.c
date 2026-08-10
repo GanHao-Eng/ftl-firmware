@@ -6,8 +6,7 @@
  *          实际固件中 DMA 由硬件完成，这里用软件模拟以便测试
  */
 
-#define _POSIX_C_SOURCE 199309L
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 
 #include "dma.h"
 #include "thread.h"
@@ -15,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 /* ============================================================
  *  内部数据结构
@@ -60,27 +60,6 @@ static uint64_t get_timestamp_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
-
-/**
- * @brief 计算传输宽度对应的字节数
- * @param[in] width 传输宽度
- * @return 字节数
- */
-static uint32_t width_to_bytes(dma_width_t width)
-{
-    switch (width) {
-    case DMA_WIDTH_BYTE:
-        return 1;
-    case DMA_WIDTH_HALFWORD:
-        return 2;
-    case DMA_WIDTH_WORD:
-        return 4;
-    case DMA_WIDTH_DOUBLEWORD:
-        return 8;
-    default:
-        return 1;
-    }
 }
 
 /**

@@ -11,11 +11,13 @@ CFLAGS += -I modules/ftl
 CFLAGS += -I modules/log
 CFLAGS += -I modules/host_if
 CFLAGS += -I modules/manager
+CFLAGS += -I modules/thread
+CFLAGS += -I modules/dma
 CFLAGS += -I ipc
 CFLAGS += -I utils
 CFLAGS += -DDEBUG
 
-LDFLAGS =
+LDFLAGS = -lpthread
 
 # 目录配置
 SRC_DIR     = src
@@ -32,6 +34,8 @@ CORE_SRCS = $(SRC_DIR)/main.c \
             $(MODULES_DIR)/log/log.c \
             $(MODULES_DIR)/host_if/host_if.c \
             $(MODULES_DIR)/manager/manager.c \
+            $(MODULES_DIR)/thread/thread.c \
+            $(MODULES_DIR)/dma/dma.c \
             $(IPC_DIR)/msg_queue.c \
             $(UTILS_DIR)/utils.c
 
@@ -56,6 +60,8 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/log
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/host_if
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/manager
+	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/thread
+	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/dma
 	@mkdir -p $(BUILD_DIR)/$(IPC_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UTILS_DIR)
 

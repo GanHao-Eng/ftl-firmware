@@ -77,8 +77,8 @@ typedef enum {
  * @brief DMA 传输描述符结构体
  */
 typedef struct {
-    uint32_t src_addr;          ///< 源地址
-    uint32_t dst_addr;          ///< 目标地址
+    void *src_addr;             ///< 源地址
+    void *dst_addr;             ///< 目标地址
     uint32_t length;            ///< 传输长度（字节）
     dma_direction_t direction;  ///< 传输方向
     dma_width_t src_width;      ///< 源传输宽度

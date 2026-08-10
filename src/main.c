@@ -488,8 +488,8 @@ static int run_dma_test(void)
     /* 测试同步 DMA 传输 */
     printf("\n[测试] 同步 DMA 传输\n");
     memset(&desc, 0, sizeof(desc));
-    desc.src_addr = (uint32_t)(uintptr_t)src_buf;
-    desc.dst_addr = (uint32_t)(uintptr_t)dst_buf;
+    desc.src_addr = src_buf;
+    desc.dst_addr = dst_buf;
     desc.length = 4096;
     desc.direction = DMA_DIR_MEM_TO_MEM;
     desc.src_width = DMA_WIDTH_WORD;

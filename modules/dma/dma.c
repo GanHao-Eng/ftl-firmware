@@ -97,11 +97,11 @@ static void *dma_transfer_thread(void *arg)
     ch->transferred = 0;
 
     /* 获取源地址和目标地址 */
-    src = (uint8_t *)(uintptr_t)ch->desc.src_addr;
-    dst = (uint8_t *)(uintptr_t)ch->desc.dst_addr;
+    src = (uint8_t *)ch->desc.src_addr;
+    dst = (uint8_t *)ch->desc.dst_addr;
     remaining = ch->desc.length;
 
-    printf("[DMA] 通道 %u 开始传输: 源=0x%08X, 目标=0x%08X, 长度=%u\n",
+    printf("[DMA] 通道 %u 开始传输: 源=%p, 目标=%p, 长度=%u\n",
            ch->channel_id, ch->desc.src_addr, ch->desc.dst_addr, ch->desc.length);
 
     mutex_unlock(ch->mutex);
@@ -445,6 +445,8 @@ ret_code_t dma_resume_transfer(uint32_t channel)
 ret_code_t dma_wait_complete(uint32_t channel, uint32_t timeout_ms)
 {
     ret_code_t ret = RET_OK;
+    uint64_t start_time = 0;
+    uint64_t elapsed = 0;
 
     if (!g_dma_initialized) {
         return RET_ERR_NOT_INIT;
@@ -456,20 +458,22 @@ ret_code_t dma_wait_complete(uint32_t channel, uint32_t timeout_ms)
         return RET_ERR_PARAM;
     }
 
-    /* 等待传输完成 */
-    mutex_lock(g_channels[channel].mutex);
+    /* 记录开始时间，用于超时检测 */
+    start_time = get_timestamp_ms();
 
-    while (g_channels[channel].state == DMA_CH_STATE_RUNNING ||
+    /* 等待传输完成（包括 READY 状态，因为线程可能还没开始运行） */
+    while (g_channels[channel].state == DMA_CH_STATE_READY ||
+           g_channels[channel].state == DMA_CH_STATE_RUNNING ||
            g_channels[channel].state == DMA_CH_STATE_PAUSED) {
-        ret = cond_timedwait(g_channels[channel].cond,
-                             g_channels[channel].mutex, timeout_ms);
-        if (ret == RET_ERR_TIMEOUT) {
-            mutex_unlock(g_channels[channel].mutex);
+        /* 检查超时 */
+        elapsed = get_timestamp_ms() - start_time;
+        if (elapsed >= timeout_ms) {
             return RET_ERR_TIMEOUT;
         }
-    }
 
-    mutex_unlock(g_channels[channel].mutex);
+        /* 短暂休眠，避免占用 CPU */
+        thread_sleep(1);
+    }
 
     /* 等待传输线程结束 */
     if (g_channels[channel].thread_id != 0) {

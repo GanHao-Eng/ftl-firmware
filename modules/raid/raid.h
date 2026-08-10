@@ -9,7 +9,7 @@
 #ifndef RAID_H
 #define RAID_H
 
-#include "common.h"
+#include "common/common.h"
 #include "ftl.h"
 
 #ifdef __cplusplus

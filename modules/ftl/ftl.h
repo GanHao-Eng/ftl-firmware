@@ -357,6 +357,32 @@ ret_code_t ftl_handle_read_disturb(void);
 ret_code_t ftl_trim(uint32_t lpn, uint32_t count);
 
 /* ============================================================
+ *  安全擦除接口
+ * ============================================================ */
+
+/**
+ * @brief 安全擦除指定范围的逻辑页
+ * @param[in] lpn 起始逻辑页号
+ * @param[in] count 逻辑页数量
+ * @param[in] passes 覆写次数（建议 >= 3）
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数错误
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @note 安全擦除通过多次覆写不同数据模式来确保数据不可恢复
+ *       覆写模式：全0 → 全1 → 随机数据 → 擦除
+ */
+ret_code_t ftl_secure_erase(uint32_t lpn, uint32_t count, uint32_t passes);
+
+/**
+ * @brief 安全擦除整个设备
+ * @param[in] passes 覆写次数（建议 >= 3）
+ * @retval RET_OK 成功
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @note 擦除所有逻辑页，恢复到出厂状态
+ */
+ret_code_t ftl_secure_erase_all(uint32_t passes);
+
+/* ============================================================
  *  掉电保护接口
  * ============================================================ */
 

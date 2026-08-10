@@ -1803,6 +1803,139 @@ ret_code_t ftl_trim(uint32_t lpn, uint32_t count)
 }
 
 /* ============================================================
+ *  安全擦除接口实现
+ * ============================================================ */
+
+/**
+ * @brief 生成安全擦除的数据模式
+ * @param[out] buf 数据缓冲区
+ * @param[in] size 缓冲区大小
+ * @param[in] pass 当前覆写次数（从0开始）
+ * @note 根据覆写次数生成不同的数据模式：
+ *       - 第0次：全0 (0x00)
+ *       - 第1次：全1 (0xFF)
+ *       - 第2次：0xAA交替
+ *       - 第3次：0x55交替
+ *       - 其他：伪随机模式
+ */
+static void generate_erase_pattern(uint8_t *buf, uint32_t size, uint32_t pass)
+{
+    uint32_t i = 0;
+    uint8_t pattern = 0;
+
+    if (buf == NULL || size == 0) {
+        return;
+    }
+
+    /* 根据覆写次数选择数据模式 */
+    switch (pass % 4) {
+    case 0:
+        pattern = 0x00;  /* 全0 */
+        break;
+    case 1:
+        pattern = 0xFF;  /* 全1 */
+        break;
+    case 2:
+        pattern = 0xAA;  /* 10101010 */
+        break;
+    case 3:
+        pattern = 0x55;  /* 01010101 */
+        break;
+    default:
+        pattern = (uint8_t)(pass * 37);  /* 伪随机模式 */
+        break;
+    }
+
+    /* 填充数据模式 */
+    memset(buf, pattern, size);
+}
+
+ret_code_t ftl_secure_erase(uint32_t lpn, uint32_t count, uint32_t passes)
+{
+    uint8_t *erase_buf = NULL;
+    uint32_t i = 0;
+    uint32_t pass = 0;
+    ret_code_t ret = RET_OK;
+
+    /* 入参校验 */
+    if (!g_ftl_dev.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+    if (count == 0U) {
+        return RET_ERR_PARAM;
+    }
+    if (passes == 0U) {
+        return RET_ERR_PARAM;
+    }
+    if (lpn >= FTL_TOTAL_LPNS) {
+        return RET_ERR_PARAM;
+    }
+    if ((lpn + count) > FTL_TOTAL_LPNS) {
+        count = FTL_TOTAL_LPNS - lpn;
+    }
+
+    /* 分配擦除缓冲区 */
+    erase_buf = (uint8_t *)malloc(NAND_PAGE_SIZE);
+    if (erase_buf == NULL) {
+        return RET_ERR_INTERNAL;
+    }
+
+    LOG_INFO("开始安全擦除: 起始LPN=%u, 页数=%u, 覆写次数=%u",
+             lpn, count, passes);
+
+    /* 多次覆写，每次使用不同的数据模式 */
+    for (pass = 0; pass < passes; pass++) {
+        /* 生成当前次的数据模式 */
+        generate_erase_pattern(erase_buf, NAND_PAGE_SIZE, pass);
+
+        LOG_DEBUG("安全擦除第 %u 次覆写，模式=0x%02X",
+                  pass, erase_buf[0]);
+
+        /* 逐页覆写 */
+        for (i = 0; i < count; i++) {
+            ret = ftl_write(lpn + i, erase_buf);
+            if (ret != RET_OK) {
+                LOG_ERROR("安全擦除失败: LPN=%u, 错误码=%d", lpn + i, ret);
+                free(erase_buf);
+                return ret;
+            }
+        }
+    }
+
+    /* 最后执行 TRIM 操作，标记为无效 */
+    ret = ftl_trim(lpn, count);
+    if (ret != RET_OK) {
+        LOG_ERROR("安全擦除最后TRIM失败: 错误码=%d", ret);
+        free(erase_buf);
+        return ret;
+    }
+
+    /* 释放缓冲区 */
+    free(erase_buf);
+
+    LOG_INFO("安全擦除完成: 起始LPN=%u, 页数=%u, 覆写次数=%u",
+             lpn, count, passes);
+
+    return RET_OK;
+}
+
+ret_code_t ftl_secure_erase_all(uint32_t passes)
+{
+    /* 入参校验 */
+    if (!g_ftl_dev.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+    if (passes == 0U) {
+        return RET_ERR_PARAM;
+    }
+
+    LOG_INFO("开始全盘安全擦除，覆写次数=%u", passes);
+
+    /* 擦除所有逻辑页 */
+    return ftl_secure_erase(0, FTL_TOTAL_LPNS, passes);
+}
+
+/* ============================================================
  *  坏块管理接口实现
  * ============================================================ */
 

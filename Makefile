@@ -13,6 +13,7 @@ CFLAGS += -I modules/host_if
 CFLAGS += -I modules/manager
 CFLAGS += -I modules/thread
 CFLAGS += -I modules/dma
+CFLAGS += -I modules/raid
 CFLAGS += -I ipc
 CFLAGS += -I utils
 CFLAGS += -DDEBUG
@@ -36,6 +37,7 @@ CORE_SRCS = $(SRC_DIR)/main.c \
             $(MODULES_DIR)/manager/manager.c \
             $(MODULES_DIR)/thread/thread.c \
             $(MODULES_DIR)/dma/dma.c \
+            $(MODULES_DIR)/raid/raid.c \
             $(IPC_DIR)/msg_queue.c \
             $(UTILS_DIR)/utils.c
 
@@ -62,6 +64,7 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/manager
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/thread
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/dma
+	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/raid
 	@mkdir -p $(BUILD_DIR)/$(IPC_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UTILS_DIR)
 

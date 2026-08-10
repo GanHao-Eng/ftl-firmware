@@ -17,6 +17,7 @@
 #include "manager.h"
 #include "thread.h"
 #include "dma.h"
+#include "raid.h"
 
 /* ============================================================
  *  全局配置
@@ -66,6 +67,12 @@ static int firmware_main_loop(void)
 
         /* 主机接口处理 */
         host_if_process();
+
+        /* 更新模块心跳（防止看门狗超时） */
+        manager_send_heartbeat(MODULE_NAND);
+        manager_send_heartbeat(MODULE_FTL);
+        manager_send_heartbeat(MODULE_HOST_IF);
+        manager_send_heartbeat(MODULE_LOG);
 
         /* 打印状态（每 1000 次循环打印一次） */
         loop_count++;
@@ -578,6 +585,172 @@ static int run_dma_test(void)
 }
 
 /* ============================================================
+ *  RAID 功能测试
+ * ============================================================ */
+
+/**
+ * @brief 运行 RAID 功能测试
+ * @return 0 成功，-1 失败
+ */
+static int run_raid_test(void)
+{
+    int pass = 1;
+    raid_config_t config;
+    uint8_t write_buf[NAND_PAGE_SIZE];
+    uint8_t read_buf[NAND_PAGE_SIZE];
+    uint32_t i = 0;
+    uint64_t lpn = 0;
+
+    printf("\n========================================\n");
+    printf("    RAID 功能测试\n");
+    printf("========================================\n");
+
+    /* 测试 RAID 0 */
+    printf("\n--- RAID 0 (条带化) 测试 ---\n");
+
+    /* 初始化 RAID 0 */
+    memset(&config, 0, sizeof(config));
+    config.level = RAID_LEVEL_0;
+    config.member_count = 2;
+    config.stripe_size = RAID_STRIPE_SIZE_PAGES;
+    config.auto_rebuild = true;
+
+    printf("[测试] 初始化 RAID 0\n");
+    if (raid_init(&config) != RET_OK) {
+        printf("  初始化: ❌ 失败\n");
+        return -1;
+    }
+    printf("  初始化: ✅ 通过\n");
+
+    /* 添加成员 */
+    printf("[测试] 添加 RAID 成员\n");
+    for (i = 0; i < config.member_count; i++) {
+        if (raid_add_member(i, i) != RET_OK) {
+            printf("  添加成员 %u: ❌ 失败\n", i);
+            pass = 0;
+        } else {
+            printf("  添加成员 %u: ✅ 通过\n", i);
+        }
+    }
+
+    printf("  逻辑容量: %llu 页\n", (unsigned long long)raid_get_logical_capacity());
+
+    /* 写入测试数据 */
+    printf("[测试] RAID 0 写入测试\n");
+    for (i = 0; i < NAND_PAGE_SIZE; i++) {
+        write_buf[i] = (uint8_t)(i & 0xFF);
+    }
+
+    for (lpn = 0; lpn < 8; lpn++) {
+        write_buf[0] = (uint8_t)lpn;
+        if (raid_write(lpn, write_buf) != RET_OK) {
+            printf("  写入 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+        }
+    }
+    printf("  写入 8 页: ✅ 通过\n");
+
+    /* 读取并验证数据 */
+    printf("[测试] RAID 0 读取验证\n");
+    for (lpn = 0; lpn < 8; lpn++) {
+        memset(read_buf, 0, sizeof(read_buf));
+        if (raid_read(lpn, read_buf) != RET_OK) {
+            printf("  读取 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+            continue;
+        }
+
+        write_buf[0] = (uint8_t)lpn;
+        if (memcmp(write_buf, read_buf, NAND_PAGE_SIZE) != 0) {
+            printf("  数据验证 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+        }
+    }
+    printf("  读取验证 8 页: ✅ 通过\n");
+
+    /* 打印状态 */
+    raid_print_status();
+
+    /* 反初始化 */
+    raid_deinit();
+
+    /* 测试 RAID 1 */
+    printf("\n--- RAID 1 (镜像) 测试 ---\n");
+
+    /* 初始化 RAID 1 */
+    memset(&config, 0, sizeof(config));
+    config.level = RAID_LEVEL_1;
+    config.member_count = 2;
+    config.stripe_size = 1;
+    config.auto_rebuild = true;
+
+    printf("[测试] 初始化 RAID 1\n");
+    if (raid_init(&config) != RET_OK) {
+        printf("  初始化: ❌ 失败\n");
+        return -1;
+    }
+    printf("  初始化: ✅ 通过\n");
+
+    /* 添加成员 */
+    printf("[测试] 添加 RAID 成员\n");
+    for (i = 0; i < config.member_count; i++) {
+        if (raid_add_member(i, i + 10) != RET_OK) {
+            printf("  添加成员 %u: ❌ 失败\n", i);
+            pass = 0;
+        } else {
+            printf("  添加成员 %u: ✅ 通过\n", i);
+        }
+    }
+
+    printf("  逻辑容量: %llu 页\n", (unsigned long long)raid_get_logical_capacity());
+
+    /* 写入测试数据 */
+    printf("[测试] RAID 1 写入测试\n");
+    for (i = 0; i < NAND_PAGE_SIZE; i++) {
+        write_buf[i] = (uint8_t)(0xAA + (i & 0xFF));
+    }
+
+    for (lpn = 0; lpn < 4; lpn++) {
+        write_buf[0] = (uint8_t)(lpn + 0x10);
+        if (raid_write(lpn, write_buf) != RET_OK) {
+            printf("  写入 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+        }
+    }
+    printf("  写入 4 页: ✅ 通过\n");
+
+    /* 读取并验证数据 */
+    printf("[测试] RAID 1 读取验证\n");
+    for (lpn = 0; lpn < 4; lpn++) {
+        memset(read_buf, 0, sizeof(read_buf));
+        if (raid_read(lpn, read_buf) != RET_OK) {
+            printf("  读取 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+            continue;
+        }
+
+        write_buf[0] = (uint8_t)(lpn + 0x10);
+        if (memcmp(write_buf, read_buf, NAND_PAGE_SIZE) != 0) {
+            printf("  数据验证 LPN %llu: ❌ 失败\n", (unsigned long long)lpn);
+            pass = 0;
+        }
+    }
+    printf("  读取验证 4 页: ✅ 通过\n");
+
+    /* 打印状态 */
+    raid_print_status();
+
+    /* 反初始化 */
+    raid_deinit();
+
+    printf("\n========================================\n");
+    printf("    测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
+    printf("========================================\n");
+
+    return pass ? 0 : -1;
+}
+
+/* ============================================================
  *  主函数
  * ============================================================ */
 
@@ -627,6 +800,11 @@ int main(int argc, char *argv[])
     /* 运行 DMA 测试 */
     if (result == 0) {
         result = run_dma_test();
+    }
+
+    /* 运行 RAID 测试 */
+    if (result == 0) {
+        result = run_raid_test();
     }
 
     /* 运行主循环 */

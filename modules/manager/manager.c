@@ -19,6 +19,8 @@ typedef struct {
     firmware_config_t config;        ///< 配置
     firmware_stats_t stats;          ///< 统计信息
     module_info_t modules[MODULE_MAX]; ///< 模块信息
+    thermal_state_t thermal;         ///< 温度管理状态
+    power_state_info_t power;        ///< 电源管理状态
     bool is_initialized;             ///< 初始化标志
     bool is_running;                 ///< 运行标志
 } manager_dev_t;
@@ -225,6 +227,111 @@ static void process_health_check(void)
     g_manager.stats.total_uptime_ms++;
 }
 
+/**
+ * @brief 处理温度管理
+ * @details 根据当前温度自动调整温度状态：
+ *          - 温度超过警告阈值 → 进入警告状态
+ *          - 温度超过严重阈值 → 进入严重状态，触发降频
+ *          - 温度超过关机阈值 → 进入关机状态
+ *          - 温度恢复到正常阈值以下 → 恢复正常
+ */
+static void process_thermal_management(void)
+{
+    thermal_state_t *thermal = &g_manager.thermal;
+    const thermal_config_t *config = &g_manager.config.thermal;
+
+    /* 根据当前温度判断状态 */
+    if (thermal->current_temp >= config->shutdown_threshold) {
+        /* 温度过高，需要关机 */
+        if (thermal->state != TEMP_STATE_SHUTDOWN) {
+            printf("[管理模块] 温度过高 (%d°C)，触发关机保护\n", thermal->current_temp);
+            thermal->state = TEMP_STATE_SHUTDOWN;
+        }
+    } else if (thermal->current_temp >= config->critical_threshold) {
+        /* 温度严重，触发降频 */
+        if (thermal->state != TEMP_STATE_CRITICAL) {
+            printf("[管理模块] 温度严重 (%d°C)，触发降频\n", thermal->current_temp);
+            thermal->state = TEMP_STATE_CRITICAL;
+            thermal->throttling_count++;
+        }
+        thermal->total_throttling_ms++;
+    } else if (thermal->current_temp >= config->warning_threshold) {
+        /* 温度警告 */
+        if (thermal->state != TEMP_STATE_WARNING) {
+            printf("[管理模块] 温度警告 (%d°C)\n", thermal->current_temp);
+            thermal->state = TEMP_STATE_WARNING;
+        }
+    } else if (thermal->current_temp <= config->normal_threshold) {
+        /* 温度恢复正常 */
+        if (thermal->state != TEMP_STATE_NORMAL) {
+            printf("[管理模块] 温度恢复正常 (%d°C)\n", thermal->current_temp);
+            thermal->state = TEMP_STATE_NORMAL;
+        }
+    }
+
+    /* 更新历史最高温度 */
+    if (thermal->current_temp > thermal->max_temp) {
+        thermal->max_temp = thermal->current_temp;
+    }
+}
+
+/**
+ * @brief 处理电源管理
+ * @details 根据系统活动时间自动调整电源状态：
+ *          - 活跃状态 → 空闲超时 → 空闲状态
+ *          - 空闲状态 → 待机超时 → 待机状态
+ *          - 待机状态 → 睡眠超时 → 睡眠状态
+ *          - 有活动时 → 恢复到活跃状态
+ */
+static void process_power_management(void)
+{
+    power_state_info_t *power = &g_manager.power;
+    const power_config_t *config = &g_manager.config.power;
+    uint64_t now = 0;
+    uint64_t idle_time = 0;
+
+    if (!config->power_management) {
+        return;
+    }
+
+    now = get_timestamp_ms();
+
+    /* 计算空闲时间 */
+    if (power->last_activity_ms <= now) {
+        idle_time = now - power->last_activity_ms;
+    } else {
+        idle_time = 0;
+    }
+
+    /* 根据空闲时间调整电源状态 */
+    if (idle_time >= config->sleep_timeout_ms) {
+        if (power->current_state != POWER_STATE_SLEEP) {
+            printf("[管理模块] 进入睡眠状态\n");
+            power->current_state = POWER_STATE_SLEEP;
+            power->power_state_changes++;
+        }
+    } else if (idle_time >= config->standby_timeout_ms) {
+        if (power->current_state != POWER_STATE_STANDBY) {
+            printf("[管理模块] 进入待机状态\n");
+            power->current_state = POWER_STATE_STANDBY;
+            power->power_state_changes++;
+        }
+    } else if (idle_time >= config->idle_timeout_ms) {
+        if (power->current_state != POWER_STATE_IDLE) {
+            printf("[管理模块] 进入空闲状态\n");
+            power->current_state = POWER_STATE_IDLE;
+            power->power_state_changes++;
+        }
+    }
+
+    /* 统计各状态时间 */
+    if (power->current_state == POWER_STATE_ACTIVE) {
+        power->total_active_ms++;
+    } else {
+        power->total_idle_ms++;
+    }
+}
+
 /* ============================================================
  *  接口实现
  * ============================================================ */
@@ -260,6 +367,38 @@ ret_code_t manager_init(const firmware_config_t *config)
     g_manager.stats.reset_count = 0U;
     g_manager.stats.power_on_count = 1U;
     g_manager.stats.overall_health = HEALTH_STATUS_UNKNOWN;
+
+    /* 初始化温度管理状态 */
+    g_manager.thermal.current_temp = 25;  /* 默认室温 25°C */
+    g_manager.thermal.max_temp = 25;
+    g_manager.thermal.state = TEMP_STATE_NORMAL;
+    g_manager.thermal.throttling_count = 0U;
+    g_manager.thermal.total_throttling_ms = 0U;
+
+    /* 设置默认温度阈值 */
+    if (g_manager.config.thermal.warning_threshold == 0) {
+        g_manager.config.thermal.warning_threshold = 70;   /* 70°C 警告 */
+        g_manager.config.thermal.critical_threshold = 80;  /* 80°C 严重 */
+        g_manager.config.thermal.shutdown_threshold = 90;  /* 90°C 关机 */
+        g_manager.config.thermal.normal_threshold = 60;    /* 60°C 恢复正常 */
+        g_manager.config.thermal.thermal_throttling = true;
+    }
+
+    /* 初始化电源管理状态 */
+    g_manager.power.current_state = POWER_STATE_ACTIVE;
+    g_manager.power.target_state = POWER_STATE_ACTIVE;
+    g_manager.power.last_activity_ms = 0U;
+    g_manager.power.power_state_changes = 0U;
+    g_manager.power.total_active_ms = 0U;
+    g_manager.power.total_idle_ms = 0U;
+
+    /* 设置默认电源管理超时 */
+    if (g_manager.config.power.idle_timeout_ms == 0) {
+        g_manager.config.power.idle_timeout_ms = 5000;     /* 5秒空闲 */
+        g_manager.config.power.standby_timeout_ms = 30000; /* 30秒待机 */
+        g_manager.config.power.sleep_timeout_ms = 60000;   /* 60秒睡眠 */
+        g_manager.config.power.power_management = true;
+    }
 
     g_manager.is_initialized = true;
     g_manager.is_running = false;
@@ -404,6 +543,16 @@ ret_code_t manager_process(void)
 
     /* 执行健康检查 */
     process_health_check();
+
+    /* 执行温度管理 */
+    process_thermal_management();
+
+    /* 执行电源管理 */
+    process_power_management();
+
+    /* 同步温度和电源状态到统计信息 */
+    memcpy(&g_manager.stats.thermal, &g_manager.thermal, sizeof(thermal_state_t));
+    memcpy(&g_manager.stats.power, &g_manager.power, sizeof(power_state_info_t));
 
     return RET_OK;
 }
@@ -588,4 +737,151 @@ void manager_print_stats(void)
     printf("  复位次数:     %u\n", g_manager.stats.reset_count);
     printf("  上电次数:     %u\n", g_manager.stats.power_on_count);
     printf("  整体健康状态: %s\n", health_str[g_manager.stats.overall_health]);
+}
+
+/* ============================================================
+ *  温度管理接口实现
+ * ============================================================ */
+
+ret_code_t manager_update_temperature(int32_t temperature)
+{
+    if (!g_manager.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    /* 更新当前温度 */
+    g_manager.thermal.current_temp = temperature;
+
+    /* 立即执行温度管理处理 */
+    process_thermal_management();
+
+    return RET_OK;
+}
+
+ret_code_t manager_get_thermal_state(thermal_state_t *state)
+{
+    if (state == NULL) {
+        return RET_ERR_PARAM;
+    }
+    if (!g_manager.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    memcpy(state, &g_manager.thermal, sizeof(thermal_state_t));
+
+    return RET_OK;
+}
+
+temp_state_t manager_get_temp_state(void)
+{
+    if (!g_manager.is_initialized) {
+        return TEMP_STATE_UNKNOWN;
+    }
+
+    return g_manager.thermal.state;
+}
+
+void manager_print_thermal_info(void)
+{
+    const char *state_str[] = {"正常", "警告", "严重", "关机"};
+
+    if (!g_manager.is_initialized) {
+        printf("管理模块未初始化\n");
+        return;
+    }
+
+    printf("温度管理信息:\n");
+    printf("  当前温度:     %d°C\n", g_manager.thermal.current_temp);
+    printf("  历史最高:     %d°C\n", g_manager.thermal.max_temp);
+    printf("  温度状态:     %s\n", state_str[g_manager.thermal.state]);
+    printf("  降频次数:     %u\n", g_manager.thermal.throttling_count);
+    printf("  总降频时间:   %llu ms\n", (unsigned long long)g_manager.thermal.total_throttling_ms);
+    printf("  警告阈值:     %d°C\n", g_manager.config.thermal.warning_threshold);
+    printf("  严重阈值:     %d°C\n", g_manager.config.thermal.critical_threshold);
+    printf("  关机阈值:     %d°C\n", g_manager.config.thermal.shutdown_threshold);
+}
+
+/* ============================================================
+ *  电源管理接口实现
+ * ============================================================ */
+
+ret_code_t manager_set_power_state(power_state_t state)
+{
+    if (state >= POWER_STATE_MAX) {
+        return RET_ERR_PARAM;
+    }
+    if (!g_manager.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    /* 设置目标电源状态 */
+    g_manager.power.target_state = state;
+    g_manager.power.current_state = state;
+    g_manager.power.power_state_changes++;
+
+    /* 重置活动时间 */
+    g_manager.power.last_activity_ms = get_timestamp_ms();
+
+    return RET_OK;
+}
+
+power_state_t manager_get_power_state(void)
+{
+    if (!g_manager.is_initialized) {
+        return POWER_STATE_ACTIVE;
+    }
+
+    return g_manager.power.current_state;
+}
+
+ret_code_t manager_report_activity(void)
+{
+    if (!g_manager.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    /* 更新最后活动时间 */
+    g_manager.power.last_activity_ms = get_timestamp_ms();
+
+    /* 如果当前不是活跃状态，恢复到活跃状态 */
+    if (g_manager.power.current_state != POWER_STATE_ACTIVE) {
+        g_manager.power.current_state = POWER_STATE_ACTIVE;
+        g_manager.power.power_state_changes++;
+    }
+
+    return RET_OK;
+}
+
+ret_code_t manager_get_power_state_info(power_state_info_t *info)
+{
+    if (info == NULL) {
+        return RET_ERR_PARAM;
+    }
+    if (!g_manager.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    memcpy(info, &g_manager.power, sizeof(power_state_info_t));
+
+    return RET_OK;
+}
+
+void manager_print_power_info(void)
+{
+    const char *state_str[] = {"活跃", "空闲", "待机", "睡眠", "深度睡眠"};
+
+    if (!g_manager.is_initialized) {
+        printf("管理模块未初始化\n");
+        return;
+    }
+
+    printf("电源管理信息:\n");
+    printf("  当前状态:     %s\n", state_str[g_manager.power.current_state]);
+    printf("  目标状态:     %s\n", state_str[g_manager.power.target_state]);
+    printf("  状态变更次数: %u\n", g_manager.power.power_state_changes);
+    printf("  总活跃时间:   %llu ms\n", (unsigned long long)g_manager.power.total_active_ms);
+    printf("  总空闲时间:   %llu ms\n", (unsigned long long)g_manager.power.total_idle_ms);
+    printf("  空闲超时:     %u ms\n", g_manager.config.power.idle_timeout_ms);
+    printf("  待机超时:     %u ms\n", g_manager.config.power.standby_timeout_ms);
+    printf("  睡眠超时:     %u ms\n", g_manager.config.power.sleep_timeout_ms);
 }

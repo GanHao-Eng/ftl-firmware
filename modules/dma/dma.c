@@ -6,6 +6,9 @@
  *          实际固件中 DMA 由硬件完成，这里用软件模拟以便测试
  */
 
+#define _POSIX_C_SOURCE 199309L
+#define _DEFAULT_SOURCE
+
 #include "dma.h"
 #include "thread.h"
 #include <string.h>
@@ -302,7 +305,7 @@ ret_code_t dma_free_channel(uint32_t channel)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     /* 如果正在传输，先停止 */
@@ -328,7 +331,7 @@ ret_code_t dma_config_channel(uint32_t channel, const dma_transfer_desc_t *desc)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
     if (g_channels[channel].state == DMA_CH_STATE_RUNNING) {
         return RET_ERR_BUSY;
@@ -354,7 +357,7 @@ ret_code_t dma_start_transfer(uint32_t channel)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
     if (g_channels[channel].state != DMA_CH_STATE_READY &&
         g_channels[channel].state != DMA_CH_STATE_PAUSED) {
@@ -390,7 +393,7 @@ ret_code_t dma_stop_transfer(uint32_t channel)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     mutex_lock(g_channels[channel].mutex);
@@ -421,7 +424,7 @@ ret_code_t dma_pause_transfer(uint32_t channel)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
     if (g_channels[channel].state != DMA_CH_STATE_RUNNING) {
         return RET_ERR_INTERNAL;
@@ -445,7 +448,7 @@ ret_code_t dma_resume_transfer(uint32_t channel)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
     if (g_channels[channel].state != DMA_CH_STATE_PAUSED) {
         return RET_ERR_INTERNAL;
@@ -471,7 +474,7 @@ ret_code_t dma_wait_complete(uint32_t channel, uint32_t timeout_ms)
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     /* 等待传输完成 */
@@ -508,7 +511,7 @@ ret_code_t dma_set_callback(uint32_t channel, dma_callback_t callback,
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     g_channels[channel].callback = callback;
@@ -529,7 +532,7 @@ ret_code_t dma_get_channel_status(uint32_t channel, dma_channel_status_t *status
         return RET_ERR_PARAM;
     }
     if (!g_channels[channel].is_allocated) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     /* 复制通道状态 */

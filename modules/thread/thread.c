@@ -5,6 +5,9 @@
  *          提供线程创建、销毁、同步等功能，模拟固件中的多任务调度
  */
 
+#define _POSIX_C_SOURCE 199309L
+#define _DEFAULT_SOURCE
+
 #include "thread.h"
 #include <pthread.h>
 #include <string.h>
@@ -371,8 +374,6 @@ ret_code_t cond_broadcast(cond_handle_t cond)
 
 ret_code_t thread_manager_init(void)
 {
-    uint32_t i = 0;
-
     if (g_thread_manager_initialized) {
         return RET_OK;
     }
@@ -465,7 +466,7 @@ ret_code_t thread_destroy(uint32_t thread_id)
 
     thread = find_thread_by_id(thread_id);
     if (thread == NULL) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     /* 如果线程正在运行，先停止 */
@@ -494,7 +495,7 @@ ret_code_t thread_start(uint32_t thread_id)
 
     thread = find_thread_by_id(thread_id);
     if (thread == NULL) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     if (thread->state != THREAD_STATE_READY) {
@@ -522,7 +523,7 @@ ret_code_t thread_stop(uint32_t thread_id)
 
     thread = find_thread_by_id(thread_id);
     if (thread == NULL) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     if (thread->state != THREAD_STATE_RUNNING) {
@@ -547,7 +548,7 @@ ret_code_t thread_join(uint32_t thread_id, void **retval)
 
     thread = find_thread_by_id(thread_id);
     if (thread == NULL) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     if (thread->state != THREAD_STATE_RUNNING) {
@@ -577,7 +578,7 @@ ret_code_t thread_get_info(uint32_t thread_id, thread_info_t *info)
 
     thread = find_thread_by_id(thread_id);
     if (thread == NULL) {
-        return RET_ERR_NOT_FOUND;
+        return RET_ERR_PARAM;
     }
 
     /* 复制线程信息 */

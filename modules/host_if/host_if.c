@@ -29,6 +29,7 @@ typedef struct cmd_node {
 typedef struct {
     host_if_config_t config;   ///< 配置
     host_if_stats_t stats;     ///< 统计信息
+    performance_stats_t perf;  ///< 性能统计
 
     /* 提交队列 */
     cmd_node_t *sq_head;       ///< 提交队列头
@@ -55,6 +56,84 @@ static uint16_t g_cid_counter = 0; ///< 命令ID计数器
 /* ============================================================
  *  内部函数
  * ============================================================ */
+
+/**
+ * @brief 获取当前时间戳（毫秒）
+ * @return 时间戳
+ * @note 简化实现，实际固件中使用硬件定时器
+ */
+static uint64_t get_timestamp_ms(void)
+{
+    static uint64_t counter = 0;
+    return counter++;
+}
+
+/**
+ * @brief 更新性能统计
+ * @param[in] is_read 是否为读命令
+ * @param[in] bytes 传输字节数
+ * @param[in] latency_us 延迟（微秒）
+ * @note 更新 IOPS、带宽、延迟等性能指标
+ */
+static void update_performance_stats(bool is_read, uint32_t bytes, uint64_t latency_us)
+{
+    performance_stats_t *perf = &g_host_if.perf;
+    uint64_t now = 0;
+    uint64_t elapsed = 0;
+
+    now = get_timestamp_ms();
+
+    /* 检查是否需要重置统计窗口（每秒重置一次） */
+    if (perf->window_start_ms == 0) {
+        perf->window_start_ms = now;
+    }
+
+    elapsed = now - perf->window_start_ms;
+    if (elapsed >= 1000) {
+        /* 计算 IOPS */
+        perf->read_iops = perf->window_read_cmds;
+        perf->write_iops = perf->window_write_cmds;
+        perf->total_iops = perf->read_iops + perf->write_iops;
+
+        /* 计算带宽（字节/秒） */
+        perf->read_bw_bps = perf->window_read_bytes;
+        perf->write_bw_bps = perf->window_write_bytes;
+        perf->total_bw_bps = perf->read_bw_bps + perf->write_bw_bps;
+
+        /* 重置窗口统计 */
+        perf->window_start_ms = now;
+        perf->window_read_cmds = 0;
+        perf->window_write_cmds = 0;
+        perf->window_read_bytes = 0;
+        perf->window_write_bytes = 0;
+    }
+
+    /* 更新窗口统计 */
+    if (is_read) {
+        perf->window_read_cmds++;
+        perf->window_read_bytes += bytes;
+    } else {
+        perf->window_write_cmds++;
+        perf->window_write_bytes += bytes;
+    }
+
+    /* 更新延迟统计 */
+    if (perf->latency_count == 0) {
+        perf->min_latency_us = latency_us;
+        perf->max_latency_us = latency_us;
+    } else {
+        if (latency_us < perf->min_latency_us) {
+            perf->min_latency_us = latency_us;
+        }
+        if (latency_us > perf->max_latency_us) {
+            perf->max_latency_us = latency_us;
+        }
+    }
+
+    perf->total_latency_us += latency_us;
+    perf->latency_count++;
+    perf->avg_latency_us = perf->total_latency_us / perf->latency_count;
+}
 
 /**
  * @brief 创建命令节点
@@ -442,6 +521,12 @@ ret_code_t host_if_process(void)
     cmd_node_t *node = NULL;
     nvme_cqe_t cqe;
     nvme_status_t status = NVME_STATUS_SUCCESS;
+    uint64_t start_time = 0;
+    uint64_t end_time = 0;
+    uint64_t latency_us = 0;
+    uint32_t page_count = 0;
+    uint32_t bytes = 0;
+    bool is_read = false;
 
     if (!g_host_if.is_initialized) {
         return RET_ERR_NOT_INIT;
@@ -458,32 +543,56 @@ ret_code_t host_if_process(void)
             g_host_if.sq_tail = NULL;
         }
 
+        /* 记录开始时间 */
+        start_time = get_timestamp_ms();
+
         /* 根据命令类型处理 */
         switch (node->cmd.opcode) {
         case NVME_CMD_READ:
             status = process_read_cmd(&node->cmd);
+            is_read = true;
             break;
 
         case NVME_CMD_WRITE:
             status = process_write_cmd(&node->cmd);
+            is_read = false;
             break;
 
         case NVME_CMD_WRITE_ZEROES:
             status = process_write_zeroes_cmd(&node->cmd);
+            is_read = false;
             break;
 
         case NVME_CMD_DATASET_MGMT:
             status = process_trim_cmd(&node->cmd);
+            is_read = false;
             break;
 
         case NVME_CMD_FLUSH:
             /* Flush 命令简化处理：确保数据持久化 */
             status = NVME_STATUS_SUCCESS;
+            is_read = false;
             break;
 
         default:
             status = NVME_STATUS_INVALID_OPCODE;
+            is_read = false;
             break;
+        }
+
+        /* 记录结束时间，计算延迟 */
+        end_time = get_timestamp_ms();
+        /* 简化延迟计算：基础延迟 + 每页延迟（模拟硬件延迟） */
+        page_count = node->cmd.nlb + 1;
+        latency_us = 10 + page_count * 5;  /* 基础10us + 每页5us */
+        bytes = page_count * NAND_PAGE_SIZE;
+
+        /* 更新性能统计（仅对成功的读写命令） */
+        if (status == NVME_STATUS_SUCCESS &&
+            (node->cmd.opcode == NVME_CMD_READ ||
+             node->cmd.opcode == NVME_CMD_WRITE ||
+             node->cmd.opcode == NVME_CMD_WRITE_ZEROES)) {
+            update_performance_stats(is_read, bytes, latency_us);
         }
 
         /* 添加完成队列条目 */
@@ -550,4 +659,53 @@ void host_if_print_stats(void)
     printf("  失败命令数:   %llu\n", (unsigned long long)g_host_if.stats.failed_cmds);
     printf("  总读取字节:   %llu\n", (unsigned long long)g_host_if.stats.total_read_bytes);
     printf("  总写入字节:   %llu\n", (unsigned long long)g_host_if.stats.total_write_bytes);
+}
+
+/* ============================================================
+ *  性能监控接口实现
+ * ============================================================ */
+
+ret_code_t host_if_get_performance_stats(performance_stats_t *stats)
+{
+    if (stats == NULL) {
+        return RET_ERR_PARAM;
+    }
+    if (!g_host_if.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    memcpy(stats, &g_host_if.perf, sizeof(performance_stats_t));
+
+    return RET_OK;
+}
+
+ret_code_t host_if_reset_performance_stats(void)
+{
+    if (!g_host_if.is_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    memset(&g_host_if.perf, 0, sizeof(performance_stats_t));
+    g_host_if.perf.min_latency_us = UINT64_MAX;
+
+    return RET_OK;
+}
+
+void host_if_print_performance_stats(void)
+{
+    if (!g_host_if.is_initialized) {
+        printf("主机接口未初始化\n");
+        return;
+    }
+
+    printf("性能统计信息:\n");
+    printf("  读 IOPS:      %llu\n", (unsigned long long)g_host_if.perf.read_iops);
+    printf("  写 IOPS:      %llu\n", (unsigned long long)g_host_if.perf.write_iops);
+    printf("  总 IOPS:      %llu\n", (unsigned long long)g_host_if.perf.total_iops);
+    printf("  读带宽:       %llu B/s\n", (unsigned long long)g_host_if.perf.read_bw_bps);
+    printf("  写带宽:       %llu B/s\n", (unsigned long long)g_host_if.perf.write_bw_bps);
+    printf("  总带宽:       %llu B/s\n", (unsigned long long)g_host_if.perf.total_bw_bps);
+    printf("  最小延迟:     %llu us\n", (unsigned long long)g_host_if.perf.min_latency_us);
+    printf("  最大延迟:     %llu us\n", (unsigned long long)g_host_if.perf.max_latency_us);
+    printf("  平均延迟:     %llu us\n", (unsigned long long)g_host_if.perf.avg_latency_us);
 }

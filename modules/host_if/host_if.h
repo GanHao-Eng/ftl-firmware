@@ -108,6 +108,35 @@ typedef struct {
     uint32_t avg_latency_us;    ///< 平均延迟（微秒）
 } host_if_stats_t;
 
+/**
+ * @brief 性能统计结构体
+ */
+typedef struct {
+    /* IOPS 统计 */
+    uint64_t read_iops;         ///< 读 IOPS
+    uint64_t write_iops;        ///< 写 IOPS
+    uint64_t total_iops;        ///< 总 IOPS
+
+    /* 带宽统计 */
+    uint64_t read_bw_bps;       ///< 读带宽（字节/秒）
+    uint64_t write_bw_bps;      ///< 写带宽（字节/秒）
+    uint64_t total_bw_bps;      ///< 总带宽（字节/秒）
+
+    /* 延迟统计 */
+    uint64_t min_latency_us;    ///< 最小延迟（微秒）
+    uint64_t max_latency_us;    ///< 最大延迟（微秒）
+    uint64_t avg_latency_us;    ///< 平均延迟（微秒）
+    uint64_t total_latency_us;  ///< 总延迟（微秒）
+    uint64_t latency_count;     ///< 延迟统计次数
+
+    /* 时间窗口统计 */
+    uint64_t window_start_ms;   ///< 统计窗口开始时间
+    uint64_t window_read_cmds;  ///< 窗口内读命令数
+    uint64_t window_write_cmds; ///< 窗口内写命令数
+    uint64_t window_read_bytes; ///< 窗口内读字节数
+    uint64_t window_write_bytes;///< 窗口内写字节数
+} performance_stats_t;
+
 /* ============================================================
  *  主机接口
  * ============================================================ */
@@ -171,6 +200,32 @@ ret_code_t host_if_reset_stats(void);
  * @brief 打印主机接口统计信息
  */
 void host_if_print_stats(void);
+
+/* ============================================================
+ *  性能监控接口
+ * ============================================================ */
+
+/**
+ * @brief 获取性能统计信息
+ * @param[out] stats 性能统计信息指针
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数错误
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @note 性能统计包括 IOPS、带宽、延迟等指标
+ */
+ret_code_t host_if_get_performance_stats(performance_stats_t *stats);
+
+/**
+ * @brief 重置性能统计信息
+ * @retval RET_OK 成功
+ * @retval RET_ERR_NOT_INIT 未初始化
+ */
+ret_code_t host_if_reset_performance_stats(void);
+
+/**
+ * @brief 打印性能统计信息
+ */
+void host_if_print_performance_stats(void);
 
 #ifdef __cplusplus
 }

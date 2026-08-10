@@ -15,6 +15,8 @@
 #include "ftl.h"
 #include "host_if.h"
 #include "manager.h"
+#include "thread.h"
+#include "dma.h"
 
 /* ============================================================
  *  全局配置
@@ -319,6 +321,260 @@ static int run_basic_test(void)
 }
 
 /* ============================================================
+ *  多线程测试
+ * ============================================================ */
+
+/**
+ * @brief 测试线程函数
+ * @param[in] arg 线程参数
+ * @return 线程返回值
+ */
+static void *test_thread_func(void *arg)
+{
+    uint32_t thread_id = 0;
+    uint32_t i = 0;
+
+    thread_id = thread_get_current_id();
+    printf("[多线程测试] 线程 %u 开始运行，参数=%p\n", thread_id, arg);
+
+    /* 模拟工作 */
+    for (i = 0; i < 5; i++) {
+        printf("[多线程测试] 线程 %u 运行中... 第 %u 次\n", thread_id, i + 1);
+        thread_sleep(10);
+    }
+
+    printf("[多线程测试] 线程 %u 结束运行\n", thread_id);
+
+    return NULL;
+}
+
+/**
+ * @brief 运行多线程测试
+ * @return 0 成功，-1 失败
+ */
+static int run_thread_test(void)
+{
+    uint32_t thread1 = 0;
+    uint32_t thread2 = 0;
+    uint32_t thread3 = 0;
+    int pass = 1;
+
+    printf("\n========================================\n");
+    printf("    多线程功能测试\n");
+    printf("========================================\n\n");
+
+    /* 初始化线程管理模块 */
+    printf("[测试] 初始化线程管理模块\n");
+    if (thread_manager_init() != RET_OK) {
+        printf("  初始化: ❌ 失败\n");
+        return -1;
+    }
+    printf("  初始化: ✅ 通过\n");
+
+    /* 创建线程 */
+    printf("\n[测试] 创建线程\n");
+    thread1 = thread_create("test_thread_1", test_thread_func, NULL, THREAD_PRIORITY_NORMAL);
+    thread2 = thread_create("test_thread_2", test_thread_func, NULL, THREAD_PRIORITY_HIGH);
+    thread3 = thread_create("test_thread_3", test_thread_func, NULL, THREAD_PRIORITY_LOW);
+
+    if (thread1 == 0 || thread2 == 0 || thread3 == 0) {
+        printf("  创建线程: ❌ 失败\n");
+        pass = 0;
+    } else {
+        printf("  创建线程: ✅ 通过 (ID=%u, %u, %u)\n", thread1, thread2, thread3);
+    }
+
+    /* 启动线程 */
+    printf("\n[测试] 启动线程\n");
+    if (thread_start(thread1) != RET_OK ||
+        thread_start(thread2) != RET_OK ||
+        thread_start(thread3) != RET_OK) {
+        printf("  启动线程: ❌ 失败\n");
+        pass = 0;
+    } else {
+        printf("  启动线程: ✅ 通过\n");
+    }
+
+    /* 等待线程结束 */
+    printf("\n[测试] 等待线程结束\n");
+    thread_join(thread1, NULL);
+    thread_join(thread2, NULL);
+    thread_join(thread3, NULL);
+    printf("  等待线程: ✅ 通过\n");
+
+    /* 打印线程状态 */
+    printf("\n");
+    thread_manager_print_status();
+
+    /* 销毁线程 */
+    printf("\n[测试] 销毁线程\n");
+    thread_destroy(thread1);
+    thread_destroy(thread2);
+    thread_destroy(thread3);
+    printf("  销毁线程: ✅ 通过\n");
+
+    /* 反初始化线程管理模块 */
+    thread_manager_deinit();
+
+    printf("\n========================================\n");
+    printf("    测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
+    printf("========================================\n");
+
+    return pass ? 0 : -1;
+}
+
+/* ============================================================
+ *  DMA 测试
+ * ============================================================ */
+
+/**
+ * @brief DMA 传输完成回调
+ * @param[in] channel DMA 通道号
+ * @param[in] success 是否成功
+ * @param[in] transferred 已传输字节数
+ * @param[in] user_data 用户数据指针
+ */
+static void dma_test_callback(uint32_t channel, bool success,
+                              uint32_t transferred, void *user_data)
+{
+    printf("[DMA测试] 回调: 通道=%u, 成功=%s, 已传输=%u 字节\n",
+           channel, success ? "是" : "否", transferred);
+}
+
+/**
+ * @brief 运行 DMA 测试
+ * @return 0 成功，-1 失败
+ */
+static int run_dma_test(void)
+{
+    uint8_t *src_buf = NULL;
+    uint8_t *dst_buf = NULL;
+    dma_transfer_desc_t desc;
+    uint32_t transferred = 0;
+    uint32_t channel = 0;
+    int pass = 1;
+    uint32_t i = 0;
+
+    printf("\n========================================\n");
+    printf("    DMA 功能测试\n");
+    printf("========================================\n\n");
+
+    /* 初始化 DMA 控制器 */
+    printf("[测试] 初始化 DMA 控制器\n");
+    if (dma_init() != RET_OK) {
+        printf("  初始化: ❌ 失败\n");
+        return -1;
+    }
+    printf("  初始化: ✅ 通过\n");
+
+    /* 分配缓冲区 */
+    src_buf = (uint8_t *)malloc(4096);
+    dst_buf = (uint8_t *)malloc(4096);
+    if (src_buf == NULL || dst_buf == NULL) {
+        printf("  分配缓冲区: ❌ 失败\n");
+        dma_deinit();
+        return -1;
+    }
+
+    /* 初始化源缓冲区 */
+    for (i = 0; i < 4096; i++) {
+        src_buf[i] = (uint8_t)(i & 0xFF);
+    }
+    memset(dst_buf, 0, 4096);
+
+    /* 测试同步 DMA 传输 */
+    printf("\n[测试] 同步 DMA 传输\n");
+    memset(&desc, 0, sizeof(desc));
+    desc.src_addr = (uint32_t)(uintptr_t)src_buf;
+    desc.dst_addr = (uint32_t)(uintptr_t)dst_buf;
+    desc.length = 4096;
+    desc.direction = DMA_DIR_MEM_TO_MEM;
+    desc.src_width = DMA_WIDTH_WORD;
+    desc.dst_width = DMA_WIDTH_WORD;
+    desc.src_increment = true;
+    desc.dst_increment = true;
+    desc.interrupt_enable = true;
+
+    if (dma_transfer_sync(&desc, &transferred) != RET_OK) {
+        printf("  同步传输: ❌ 失败\n");
+        pass = 0;
+    } else {
+        printf("  同步传输: ✅ 通过 (已传输=%u 字节)\n", transferred);
+    }
+
+    /* 验证数据 */
+    printf("\n[测试] 数据一致性验证\n");
+    if (memcmp(src_buf, dst_buf, 4096) == 0) {
+        printf("  数据一致性: ✅ 通过\n");
+    } else {
+        printf("  数据一致性: ❌ 失败\n");
+        pass = 0;
+    }
+
+    /* 测试异步 DMA 传输 */
+    printf("\n[测试] 异步 DMA 传输\n");
+    memset(dst_buf, 0, 4096);
+
+    channel = dma_alloc_channel();
+    if (channel == 0xFFFFFFFF) {
+        printf("  分配通道: ❌ 失败\n");
+        pass = 0;
+    } else {
+        printf("  分配通道: ✅ 通过 (通道=%u)\n", channel);
+
+        /* 配置通道 */
+        dma_config_channel(channel, &desc);
+
+        /* 设置回调 */
+        dma_set_callback(channel, dma_test_callback, NULL);
+
+        /* 启动传输 */
+        if (dma_start_transfer(channel) != RET_OK) {
+            printf("  启动传输: ❌ 失败\n");
+            pass = 0;
+        } else {
+            printf("  启动传输: ✅ 通过\n");
+        }
+
+        /* 等待传输完成 */
+        if (dma_wait_complete(channel, 5000) != RET_OK) {
+            printf("  等待完成: ❌ 超时\n");
+            pass = 0;
+        } else {
+            printf("  等待完成: ✅ 通过\n");
+        }
+
+        /* 验证数据 */
+        if (memcmp(src_buf, dst_buf, 4096) == 0) {
+            printf("  数据一致性: ✅ 通过\n");
+        } else {
+            printf("  数据一致性: ❌ 失败\n");
+            pass = 0;
+        }
+
+        /* 释放通道 */
+        dma_free_channel(channel);
+    }
+
+    /* 打印 DMA 状态 */
+    printf("\n");
+    dma_print_status();
+
+    /* 释放缓冲区 */
+    free(src_buf);
+    free(dst_buf);
+
+    /* 反初始化 DMA 控制器 */
+    dma_deinit();
+
+    printf("\n========================================\n");
+    printf("    测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
+    printf("========================================\n");
+
+    return pass ? 0 : -1;
+}
+
+/* ============================================================
  *  主函数
  * ============================================================ */
 
@@ -359,6 +615,16 @@ int main(int argc, char *argv[])
 
     /* 运行基础测试 */
     result = run_basic_test();
+
+    /* 运行多线程测试 */
+    if (result == 0) {
+        result = run_thread_test();
+    }
+
+    /* 运行 DMA 测试 */
+    if (result == 0) {
+        result = run_dma_test();
+    }
 
     /* 运行主循环 */
     if (result == 0) {

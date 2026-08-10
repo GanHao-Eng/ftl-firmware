@@ -444,7 +444,6 @@ ret_code_t dma_resume_transfer(uint32_t channel)
 
 ret_code_t dma_wait_complete(uint32_t channel, uint32_t timeout_ms)
 {
-    ret_code_t ret = RET_OK;
     uint64_t start_time = 0;
     uint64_t elapsed = 0;
 

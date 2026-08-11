@@ -356,6 +356,85 @@ static void *test_thread_func(void *arg)
 }
 
 /**
+ * @brief NAND 多线程测试函数
+ * @param[in] arg 线程参数，指向要操作的块号（uint32_t*）
+ * @return NULL
+ * @details 每个线程操作独立的 NAND 块，测试并发读写安全性：
+ *          1. 擦除指定块
+ *          2. 写入前4页数据（每页数据不同）
+ *          3. 读取并验证数据一致性
+ *          4. 统计成功/失败次数
+ */
+static void *nand_test_thread_func(void *arg)
+{
+    uint32_t thread_id = 0;
+    uint32_t block = 0;
+    uint32_t page = 0;
+    uint8_t write_buf[NAND_PAGE_SIZE];
+    uint8_t read_buf[NAND_PAGE_SIZE];
+    ret_code_t ret = RET_OK;
+    uint32_t success_count = 0;
+    uint32_t fail_count = 0;
+
+    /* 获取线程ID和操作的块号 */
+    thread_id = thread_get_current_id();
+    block = *(uint32_t *)arg;
+
+    printf("[NAND多线程] 线程 %u 开始，操作块 %u\n", thread_id, block);
+
+    /* 步骤1：擦除块（NAND特性：写前必须擦除） */
+    ret = nand_block_erase(block);
+    if (ret != RET_OK) {
+        printf("[NAND多线程] 线程 %u 擦除块 %u 失败，错误码=%d\n", thread_id, block, ret);
+        return NULL;
+    }
+    printf("[NAND多线程] 线程 %u 擦除块 %u 成功\n", thread_id, block);
+
+    /* 步骤2：写入前4页数据，每页使用不同的数据模式 */
+    for (page = 0; page < 4; page++) {
+        /* 填充测试数据：每页第一个字节为页号，其余为页号的反码 */
+        memset(write_buf, (uint8_t)(~page & 0xFF), NAND_PAGE_SIZE);
+        write_buf[0] = (uint8_t)page;
+
+        ret = nand_page_write(block, page, write_buf);
+        if (ret != RET_OK) {
+            printf("[NAND多线程] 线程 %u 写入页 %u 失败，错误码=%d\n", thread_id, page, ret);
+            fail_count++;
+        } else {
+            success_count++;
+        }
+    }
+
+    /* 步骤3：读取并验证数据一致性 */
+    for (page = 0; page < 4; page++) {
+        memset(read_buf, 0, NAND_PAGE_SIZE);
+
+        ret = nand_page_read(block, page, read_buf);
+        if (ret != RET_OK) {
+            printf("[NAND多线程] 线程 %u 读取页 %u 失败，错误码=%d\n", thread_id, page, ret);
+            fail_count++;
+            continue;
+        }
+
+        /* 验证数据：第一个字节应为页号，其余应为页号的反码 */
+        memset(write_buf, (uint8_t)(~page & 0xFF), NAND_PAGE_SIZE);
+        write_buf[0] = (uint8_t)page;
+
+        if (memcmp(write_buf, read_buf, NAND_PAGE_SIZE) != 0) {
+            printf("[NAND多线程] 线程 %u 页 %u 数据验证失败\n", thread_id, page);
+            fail_count++;
+        } else {
+            success_count++;
+        }
+    }
+
+    printf("[NAND多线程] 线程 %u 结束，成功=%u, 失败=%u\n",
+           thread_id, success_count, fail_count);
+
+    return NULL;
+}
+
+/**
  * @brief 运行多线程测试
  * @return 0 成功，-1 失败
  */
@@ -364,6 +443,13 @@ static int run_thread_test(void)
     uint32_t thread1 = 0;
     uint32_t thread2 = 0;
     uint32_t thread3 = 0;
+    uint32_t nand_thread1 = 0;
+    uint32_t nand_thread2 = 0;
+    uint32_t nand_thread3 = 0;
+    /* NAND测试线程的块号参数（静态变量，确保线程运行期间有效） */
+    static uint32_t nand_block1 = 10;
+    static uint32_t nand_block2 = 11;
+    static uint32_t nand_block3 = 12;
     int pass = 1;
 
     printf("\n========================================\n");
@@ -378,8 +464,8 @@ static int run_thread_test(void)
     }
     printf("  初始化: ✅ 通过\n");
 
-    /* 创建线程 */
-    printf("\n[测试] 创建线程\n");
+    /* 创建普通测试线程 */
+    printf("\n[测试] 创建普通测试线程\n");
     thread1 = thread_create("test_thread_1", test_thread_func, NULL, THREAD_PRIORITY_NORMAL);
     thread2 = thread_create("test_thread_2", test_thread_func, NULL, THREAD_PRIORITY_HIGH);
     thread3 = thread_create("test_thread_3", test_thread_func, NULL, THREAD_PRIORITY_LOW);
@@ -391,33 +477,57 @@ static int run_thread_test(void)
         printf("  创建线程: ✅ 通过 (ID=%u, %u, %u)\n", thread1, thread2, thread3);
     }
 
-    /* 启动线程 */
-    printf("\n[测试] 启动线程\n");
+    /* 创建 NAND 测试线程（每个线程操作不同的块，测试并发安全性） */
+    printf("\n[测试] 创建 NAND 多线程测试\n");
+    nand_thread1 = thread_create("nand_test_1", nand_test_thread_func, &nand_block1, THREAD_PRIORITY_NORMAL);
+    nand_thread2 = thread_create("nand_test_2", nand_test_thread_func, &nand_block2, THREAD_PRIORITY_NORMAL);
+    nand_thread3 = thread_create("nand_test_3", nand_test_thread_func, &nand_block3, THREAD_PRIORITY_NORMAL);
+
+    if (nand_thread1 == 0 || nand_thread2 == 0 || nand_thread3 == 0) {
+        printf("  创建NAND线程: ❌ 失败\n");
+        pass = 0;
+    } else {
+        printf("  创建NAND线程: ✅ 通过 (ID=%u, %u, %u, 操作块=%u,%u,%u)\n",
+               nand_thread1, nand_thread2, nand_thread3,
+               nand_block1, nand_block2, nand_block3);
+    }
+
+    /* 启动所有线程 */
+    printf("\n[测试] 启动所有线程\n");
     if (thread_start(thread1) != RET_OK ||
         thread_start(thread2) != RET_OK ||
-        thread_start(thread3) != RET_OK) {
+        thread_start(thread3) != RET_OK ||
+        thread_start(nand_thread1) != RET_OK ||
+        thread_start(nand_thread2) != RET_OK ||
+        thread_start(nand_thread3) != RET_OK) {
         printf("  启动线程: ❌ 失败\n");
         pass = 0;
     } else {
         printf("  启动线程: ✅ 通过\n");
     }
 
-    /* 等待线程结束 */
-    printf("\n[测试] 等待线程结束\n");
+    /* 等待所有线程结束 */
+    printf("\n[测试] 等待所有线程结束\n");
     thread_join(thread1, NULL);
     thread_join(thread2, NULL);
     thread_join(thread3, NULL);
+    thread_join(nand_thread1, NULL);
+    thread_join(nand_thread2, NULL);
+    thread_join(nand_thread3, NULL);
     printf("  等待线程: ✅ 通过\n");
 
     /* 打印线程状态 */
     printf("\n");
     thread_manager_print_status();
 
-    /* 销毁线程 */
-    printf("\n[测试] 销毁线程\n");
+    /* 销毁所有线程 */
+    printf("\n[测试] 销毁所有线程\n");
     thread_destroy(thread1);
     thread_destroy(thread2);
     thread_destroy(thread3);
+    thread_destroy(nand_thread1);
+    thread_destroy(nand_thread2);
+    thread_destroy(nand_thread3);
     printf("  销毁线程: ✅ 通过\n");
 
     /* 反初始化线程管理模块 */

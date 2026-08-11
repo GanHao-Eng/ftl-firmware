@@ -382,6 +382,19 @@ static nvme_status_t process_write_zeroes_cmd(const nvme_cmd_t *cmd)
  *  接口实现
  * ============================================================ */
 
+/**
+ * @brief 初始化主机接口模块
+ * @param[in] config 主机接口配置指针
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数错误（空指针或队列大小为0）
+ * @retval RET_ERR_INTERNAL 内部错误（内存分配失败）
+ * @details 初始化 NVMe 主机接口，包括：
+ *          1. 分配完成队列（CQ）缓冲区
+ *          2. 初始化提交队列（SQ）链表
+ *          3. 初始化阶段标签（Phase Tag）
+ *          4. 初始化消息队列
+ *          5. 重置统计信息
+ */
 ret_code_t host_if_init(const host_if_config_t *config)
 {
     if (config == NULL) {
@@ -391,29 +404,31 @@ ret_code_t host_if_init(const host_if_config_t *config)
         return RET_ERR_PARAM;
     }
 
+    /* 清空全局设备结构体 */
     memset(&g_host_if, 0, sizeof(g_host_if));
 
     /* 保存配置 */
     memcpy(&g_host_if.config, config, sizeof(host_if_config_t));
 
-    /* 分配完成队列缓冲区 */
+    /* 分配完成队列缓冲区（环形队列） */
     g_host_if.cq_buf = (nvme_cqe_t *)malloc(sizeof(nvme_cqe_t) * config->queue_size);
     if (g_host_if.cq_buf == NULL) {
         return RET_ERR_INTERNAL;
     }
 
-    /* 初始化提交队列 */
+    /* 初始化提交队列（链表实现） */
     g_host_if.sq_head = NULL;
     g_host_if.sq_tail = NULL;
     g_host_if.sq_count = 0U;
 
-    /* 初始化完成队列 */
+    /* 初始化完成队列（环形数组实现） */
     g_host_if.cq_head = 0U;
     g_host_if.cq_tail = 0U;
     g_host_if.cq_count = 0U;
+    /* 阶段标签初始为1，主机侧初始为0，第一个CQE时主机检测到变化 */
     g_host_if.phase_tag = 1U;
 
-    /* 初始化消息队列 */
+    /* 初始化消息队列（用于与其他模块通信） */
     msg_queue_init(MODULE_HOST_IF, config->queue_size);
 
     g_host_if.is_initialized = true;
@@ -421,6 +436,16 @@ ret_code_t host_if_init(const host_if_config_t *config)
     return RET_OK;
 }
 
+/**
+ * @brief 反初始化主机接口模块
+ * @retval RET_OK 成功
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @details 释放所有资源，包括：
+ *          1. 释放提交队列中所有未处理的命令节点
+ *          2. 释放完成队列缓冲区
+ *          3. 销毁消息队列
+ *          4. 重置初始化状态
+ */
 ret_code_t host_if_deinit(void)
 {
     cmd_node_t *node = NULL;
@@ -430,7 +455,7 @@ ret_code_t host_if_deinit(void)
         return RET_ERR_NOT_INIT;
     }
 
-    /* 释放提交队列 */
+    /* 遍历并释放提交队列中的所有命令节点 */
     node = g_host_if.sq_head;
     while (node != NULL) {
         next = node->next;
@@ -438,7 +463,7 @@ ret_code_t host_if_deinit(void)
         node = next;
     }
 
-    /* 释放完成队列 */
+    /* 释放完成队列缓冲区 */
     if (g_host_if.cq_buf != NULL) {
         free(g_host_if.cq_buf);
         g_host_if.cq_buf = NULL;
@@ -452,6 +477,21 @@ ret_code_t host_if_deinit(void)
     return RET_OK;
 }
 
+/**
+ * @brief 提交 NVMe 命令到提交队列
+ * @param[in] cmd NVMe 命令指针
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数错误（空指针）
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @retval RET_ERR_NO_SPACE 提交队列已满
+ * @retval RET_ERR_INTERNAL 内部错误（内存分配失败）
+ * @details 将 NVMe 命令添加到提交队列（SQ）尾部，等待 host_if_process 处理：
+ *          1. 检查队列是否已满
+ *          2. 创建命令节点并复制命令数据
+ *          3. 自动分配命令ID（如果未设置）
+ *          4. 添加到链表尾部
+ * @note 这是异步接口，命令提交后立即返回，实际处理在 host_if_process 中完成
+ */
 ret_code_t host_if_submit_cmd(const nvme_cmd_t *cmd)
 {
     cmd_node_t *node = NULL;
@@ -463,27 +503,29 @@ ret_code_t host_if_submit_cmd(const nvme_cmd_t *cmd)
         return RET_ERR_NOT_INIT;
     }
 
-    /* 检查队列是否已满 */
+    /* 检查提交队列是否已满，防止溢出 */
     if (g_host_if.sq_count >= g_host_if.config.queue_size) {
         return RET_ERR_NO_SPACE;
     }
 
-    /* 创建命令节点 */
+    /* 创建命令节点，复制命令数据 */
     node = create_cmd_node(cmd);
     if (node == NULL) {
         return RET_ERR_INTERNAL;
     }
 
-    /* 设置命令ID */
+    /* 如果命令未设置ID，自动分配递增的ID */
     if (node->cmd.cid == 0U) {
         node->cmd.cid = g_cid_counter++;
     }
 
-    /* 添加到提交队列尾部 */
+    /* 添加到提交队列尾部（链表实现，FIFO顺序） */
     if (g_host_if.sq_head == NULL) {
+        /* 队列为空，头尾都指向新节点 */
         g_host_if.sq_head = node;
         g_host_if.sq_tail = node;
     } else {
+        /* 队列非空，追加到尾部 */
         g_host_if.sq_tail->next = node;
         g_host_if.sq_tail = node;
     }
@@ -493,6 +535,21 @@ ret_code_t host_if_submit_cmd(const nvme_cmd_t *cmd)
     return RET_OK;
 }
 
+/**
+ * @brief 轮询完成队列，获取已完成的命令
+ * @param[out] cqe 完成队列条目输出指针
+ * @retval RET_OK 成功，获取到一个完成条目
+ * @retval RET_ERR_PARAM 参数错误（空指针）
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @retval RET_ERR_BUSY 完成队列为空，没有已完成的命令
+ * @details 从完成队列（CQ）头部取出一个已完成的命令条目：
+ *          1. 检查队列是否为空
+ *          2. 复制完成队列条目到输出缓冲区
+ *          3. 更新队列头指针（环形队列取模）
+ *          4. 减少队列计数
+ * @note 这是非阻塞接口，队列为空时立即返回 RET_ERR_BUSY
+ *       主机驱动通过轮询此接口获取命令完成状态
+ */
 ret_code_t host_if_poll_cq(nvme_cqe_t *cqe)
 {
     if (cqe == NULL) {
@@ -507,15 +564,32 @@ ret_code_t host_if_poll_cq(nvme_cqe_t *cqe)
         return RET_ERR_BUSY;
     }
 
-    /* 从完成队列头取出条目 */
+    /* 从完成队列头取出条目（环形数组实现） */
     memcpy(cqe, &g_host_if.cq_buf[g_host_if.cq_head], sizeof(nvme_cqe_t));
 
+    /* 更新队列头指针，取模实现环形 */
     g_host_if.cq_head = (g_host_if.cq_head + 1) % g_host_if.config.queue_size;
     g_host_if.cq_count--;
 
     return RET_OK;
 }
 
+/**
+ * @brief 处理提交队列中的所有命令
+ * @retval RET_OK 成功
+ * @retval RET_ERR_NOT_INIT 未初始化
+ * @details 主机接口的核心处理函数，在主循环中周期性调用：
+ *          1. 从提交队列（SQ）头部依次取出命令
+ *          2. 根据命令操作码（opcode）分发到对应的处理函数
+ *          3. 支持的命令类型：读、写、Write Zeroes、TRIM(Dataset Management)、Flush
+ *          4. 模拟命令处理延迟（基础延迟+每页延迟）
+ *          5. 更新性能统计（IOPS、带宽、延迟）
+ *          6. 生成完成队列条目（CQE）并添加到完成队列
+ *          7. 更新命令统计（成功/失败计数）
+ *          8. 释放命令节点内存
+ * @note 这是同步处理接口，会处理完队列中所有命令后返回
+ *       实际固件中通常在中断上下文中处理单个命令
+ */
 ret_code_t host_if_process(void)
 {
     cmd_node_t *node = NULL;

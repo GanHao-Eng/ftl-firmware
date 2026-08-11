@@ -242,7 +242,7 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
     /* 解锁 */
     pthread_mutex_unlock(&g_nand_mutex);
 
-    return ret;
+    return RET_OK;
 }
 
 /**

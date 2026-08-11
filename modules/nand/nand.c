@@ -8,6 +8,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+
+/**
+ * @brief NAND 模块互斥锁（保护全局状态和文件操作）
+ * @details 由于使用全局文件句柄进行 fseek/fread/fwrite，
+ *          多线程并发操作时需要加锁防止竞态条件
+ */
+static pthread_mutex_t g_nand_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * @brief 物理块数组（全局实例）
@@ -202,13 +210,18 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
         return RET_ERR_PARAM;
     }
 
+    /* 加锁保护全局状态和文件操作 */
+    pthread_mutex_lock(&g_nand_mutex);
+
     /* 坏块不可读 */
     if (g_phy_blocks[block].state == BLOCK_BAD) {
+        pthread_mutex_unlock(&g_nand_mutex);
         return RET_ERR_BAD_BLOCK;
     }
 
     /* 未写入的页不可读 */
     if (g_phy_blocks[block].page_valid[page] != 1U) {
+        pthread_mutex_unlock(&g_nand_mutex);
         return RET_ERR_NOT_MAPPED;
     }
 
@@ -226,7 +239,10 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
     /* 功耗统计：读取能耗 */
     g_nand_dev.read_energy += NAND_POWER_READ_PER_PAGE;
 
-    return RET_OK;
+    /* 解锁 */
+    pthread_mutex_unlock(&g_nand_mutex);
+
+    return ret;
 }
 
 /**
@@ -247,13 +263,18 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
         return RET_ERR_PARAM;
     }
 
+    /* 加锁保护全局状态和文件操作 */
+    pthread_mutex_lock(&g_nand_mutex);
+
     /* 坏块不可写 */
     if (g_phy_blocks[block].state == BLOCK_BAD) {
+        pthread_mutex_unlock(&g_nand_mutex);
         return RET_ERR_BAD_BLOCK;
     }
 
     /* NAND 特性：已写入的页不可覆写，必须先擦除整个块 */
     if (g_phy_blocks[block].page_valid[page] == 1U) {
+        pthread_mutex_unlock(&g_nand_mutex);
         return RET_ERR_OVERWRITE;
     }
 
@@ -276,6 +297,9 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
     /* 功耗统计：写入能耗 */
     g_nand_dev.write_energy += NAND_POWER_WRITE_PER_PAGE;
 
+    /* 解锁 */
+    pthread_mutex_unlock(&g_nand_mutex);
+
     return RET_OK;
 }
 
@@ -293,8 +317,12 @@ ret_code_t nand_block_erase(uint32_t block)
         return RET_ERR_PARAM;
     }
 
+    /* 加锁保护全局状态 */
+    pthread_mutex_lock(&g_nand_mutex);
+
     /* 坏块不可擦除 */
     if (g_phy_blocks[block].state == BLOCK_BAD) {
+        pthread_mutex_unlock(&g_nand_mutex);
         return RET_ERR_BAD_BLOCK;
     }
 
@@ -307,6 +335,7 @@ ret_code_t nand_block_erase(uint32_t block)
             g_phy_blocks[block].state = BLOCK_BAD;
             g_phy_blocks[block].bad_type = BAD_BLOCK_WEAR;
             LOG_WARN("块 %u 因磨损变成坏块，擦写次数=%u", block, g_phy_blocks[block].erase_count);
+            pthread_mutex_unlock(&g_nand_mutex);
             return RET_ERR_BAD_BLOCK;
         }
     }
@@ -328,6 +357,9 @@ ret_code_t nand_block_erase(uint32_t block)
     g_nand_dev.erase_energy += NAND_POWER_ERASE_PER_BLOCK;
 
     LOG_DEBUG("块擦除成功: 块=%u, 擦写次数=%u", block, g_phy_blocks[block].erase_count);
+
+    /* 解锁 */
+    pthread_mutex_unlock(&g_nand_mutex);
 
     return RET_OK;
 }

@@ -36,7 +36,10 @@ typedef enum {
     RET_ERR_CHECKSUM    = -8,   ///< 校验和错误（数据损坏）
     RET_ERR_TIMEOUT     = -9,   ///< 操作超时
     RET_ERR_BUSY        = -10,  ///< 设备忙
-    RET_ERR_NOT_SUPPORT = -11   ///< 不支持的操作
+    RET_ERR_NOT_SUPPORT = -11,  ///< 不支持的操作
+    RET_ERR_DIF_CRC     = -12,  ///< DIF CRC校验失败
+    RET_ERR_DIF_APP_TAG = -13,  ///< DIF应用标签校验失败
+    RET_ERR_DIF_REF_TAG = -14   ///< DIF参考标签校验失败
 } ret_code_t;
 
 /* ============================================================

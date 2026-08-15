@@ -861,6 +861,230 @@ static int run_raid_test(void)
 }
 
 /* ============================================================
+ *  企业级特性测试（NVMe Admin、SMART、PLP、DIF）
+ * ============================================================ */
+
+/**
+ * @brief 运行企业级特性测试
+ * @return 0 成功，-1 失败
+ */
+static int test_enterprise_features(void)
+{
+    int pass = 1;
+    ret_code_t ret;
+
+    printf("\n========================================\n");
+    printf("    企业级特性测试\n");
+    printf("========================================\n");
+
+    /* ---------- 1. NVMe Admin 命令测试 ---------- */
+    printf("\n--- 1. NVMe Admin 命令测试 ---\n");
+
+    /* 测试 Identify Controller */
+    printf("[测试] Identify Controller\n");
+    nvme_id_ctrl_t id_ctrl;
+    ret = host_if_get_id_ctrl(&id_ctrl);
+    if (ret == RET_OK) {
+        printf("  厂商ID:       0x%04X\n", id_ctrl.vid);
+        printf("  序列号:       %.20s\n", id_ctrl.sn);
+        printf("  型号:         %.40s\n", id_ctrl.mn);
+        printf("  固件版本:     %.8s\n", id_ctrl.fr);
+        printf("  NVMe版本:     0x%08X\n", id_ctrl.ver);
+        printf("  命名空间数:   %u\n", id_ctrl.nn);
+        printf("  最大命令数:   %u\n", id_ctrl.maxcmd);
+        printf("  Identify Controller: ✅ 通过\n");
+    } else {
+        printf("  Identify Controller: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 测试 Identify Namespace */
+    printf("[测试] Identify Namespace\n");
+    nvme_id_ns_t id_ns;
+    ret = host_if_get_id_ns(&id_ns);
+    if (ret == RET_OK) {
+        printf("  命名空间大小: %llu LBA\n", (unsigned long long)id_ns.nsze);
+        printf("  命名空间容量: %llu LBA\n", (unsigned long long)id_ns.ncap);
+        printf("  已使用:       %llu LBA\n", (unsigned long long)id_ns.nuse);
+        printf("  LBA格式数:    %u\n", id_ns.nlbaf + 1);
+        printf("  格式化LBA:    %u (2^%u = %u字节)\n",
+               id_ns.flbas, id_ns.lbaf[0][0], 1 << id_ns.lbaf[0][0]);
+        printf("  端到端保护:   能力=0x%02X 设置=0x%02X\n", id_ns.dpc, id_ns.dps);
+        printf("  Identify Namespace: ✅ 通过\n");
+    } else {
+        printf("  Identify Namespace: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 测试 Get Log Page (SMART) */
+    printf("[测试] Get Log Page (SMART/Health)\n");
+    nvme_smart_log_t smart_log;
+    ret = host_if_get_smart_log(&smart_log);
+    if (ret == RET_OK) {
+        printf("  温度:         %u °C\n", smart_log.temperature - 273);
+        printf("  可用备用:     %u%%\n", smart_log.avail_spare);
+        printf("  寿命已使用:   %u%%\n", smart_log.percent_used);
+        printf("  严重警告:     0x%02X\n", smart_log.critical_warning);
+        printf("  Get Log Page: ✅ 通过\n");
+    } else {
+        printf("  Get Log Page: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 测试 Set Feature / Get Feature */
+    printf("[测试] Set Feature / Get Feature\n");
+    nvme_cmd_t feature_cmd;
+    memset(&feature_cmd, 0, sizeof(feature_cmd));
+    feature_cmd.is_admin = true;
+    feature_cmd.opcode = NVME_ADMIN_SET_FEATURE;
+    feature_cmd.nsid = NVME_FEAT_TEMP_THRESHOLD;
+    feature_cmd.slba = 350;  /* 设置温度阈值为77°C */
+    feature_cmd.data_buf = NULL;
+    feature_cmd.data_len = 0;
+    ret = host_if_submit_cmd(&feature_cmd);
+    host_if_process();
+    if (ret == RET_OK) {
+        printf("  Set Feature (温度阈值): ✅ 通过\n");
+    } else {
+        printf("  Set Feature: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 打印 SMART 信息 */
+    printf("\n[测试] 打印 SMART/健康信息\n");
+    host_if_print_smart_info();
+
+    /* ---------- 2. 断电保护（PLP）测试 ---------- */
+    printf("\n--- 2. 断电保护（PLP）测试 ---\n");
+
+    /* 模拟断电 */
+    printf("[测试] 模拟断电事件\n");
+    ret = host_if_plp_simulate_power_loss();
+    if (ret == RET_OK) {
+        printf("  模拟断电: ✅ 通过\n");
+    } else {
+        printf("  模拟断电: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 断电恢复 */
+    printf("[测试] 断电恢复\n");
+    ret = host_if_plp_recovery();
+    if (ret == RET_OK) {
+        printf("  断电恢复: ✅ 通过\n");
+    } else {
+        printf("  断电恢复: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 获取电源状态 */
+    printf("[测试] 获取电源状态\n");
+    uint64_t power_cycles, unsafe_shutdowns, power_on_hours;
+    ret = host_if_get_power_status(&power_cycles, &unsafe_shutdowns, &power_on_hours);
+    if (ret == RET_OK) {
+        printf("  上电循环:     %llu\n", (unsigned long long)power_cycles);
+        printf("  不安全关机:   %llu\n", (unsigned long long)unsafe_shutdowns);
+        printf("  上电时间:     %llu 小时\n", (unsigned long long)power_on_hours);
+        printf("  获取电源状态: ✅ 通过\n");
+    } else {
+        printf("  获取电源状态: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* ---------- 3. 端到端数据保护（DIF）测试 ---------- */
+    printf("\n--- 3. 端到端数据保护（DIF）测试 ---\n");
+
+    /* 初始化 DIF */
+    printf("[测试] DIF 初始化\n");
+    dif_config_t dif_config;
+    memset(&dif_config, 0, sizeof(dif_config));
+    dif_config.type = DIF_TYPE1;
+    dif_config.guard_check_enable = true;
+    dif_config.app_tag_check_enable = true;
+    dif_config.ref_tag_check_enable = true;
+    dif_config.app_tag = 0x1234;
+    dif_config.app_tag_mask = 0xFFFF;
+    ret = dif_init(&dif_config);
+    if (ret == RET_OK) {
+        printf("  DIF 初始化: ✅ 通过\n");
+    } else {
+        printf("  DIF 初始化: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 测试 DIF 生成和校验（正常情况） */
+    printf("[测试] DIF 生成和校验（正常数据）\n");
+    uint8_t test_data[NAND_PAGE_SIZE * 2];
+    dif_protection_t test_protection[2];
+    for (uint32_t i = 0; i < sizeof(test_data); i++) {
+        test_data[i] = (uint8_t)(i & 0xFF);
+    }
+    ret = dif_generate(test_data, sizeof(test_data), 100, test_protection);
+    if (ret == RET_OK) {
+        printf("  DIF 生成: ✅ 通过 (CRC[0]=0x%04X, RefTag[0]=0x%08X)\n",
+               test_protection[0].crc, test_protection[0].ref_tag);
+    } else {
+        printf("  DIF 生成: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    uint64_t error_lba = 0;
+    ret = dif_verify(test_data, sizeof(test_data), 100, test_protection, &error_lba);
+    if (ret == RET_OK) {
+        printf("  DIF 校验（正常）: ✅ 通过\n");
+    } else {
+        printf("  DIF 校验（正常）: ❌ 失败 (ret=%d, error_lba=%llu)\n",
+               ret, (unsigned long long)error_lba);
+        pass = 0;
+    }
+
+    /* 测试 DIF 校验（数据损坏情况） */
+    printf("[测试] DIF 校验（数据损坏）\n");
+    test_data[10] = 0xFF;  /* 篡改数据 */
+    ret = dif_verify(test_data, sizeof(test_data), 100, test_protection, &error_lba);
+    if (ret == RET_ERR_DIF_CRC) {
+        printf("  DIF 校验（损坏）: ✅ 正确检测到CRC错误 (LBA=%llu)\n",
+               (unsigned long long)error_lba);
+    } else {
+        printf("  DIF 校验（损坏）: ❌ 未检测到错误 (ret=%d)\n", ret);
+        pass = 0;
+    }
+    test_data[10] = 10;  /* 恢复数据 */
+
+    /* 测试 DIF 参考标签错误 */
+    printf("[测试] DIF 校验（参考标签错误）\n");
+    ret = dif_verify(test_data, sizeof(test_data), 200, test_protection, &error_lba);
+    if (ret == RET_ERR_DIF_REF_TAG) {
+        printf("  DIF 校验（参考标签）: ✅ 正确检测到参考标签错误 (LBA=%llu)\n",
+               (unsigned long long)error_lba);
+    } else {
+        printf("  DIF 校验（参考标签）: ❌ 未检测到错误 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    /* 获取 DIF 统计 */
+    printf("[测试] 获取 DIF 统计\n");
+    dif_stats_t dif_stats;
+    ret = dif_get_stats(&dif_stats);
+    if (ret == RET_OK) {
+        printf("  总校验次数:   %llu\n", (unsigned long long)dif_stats.total_checks);
+        printf("  CRC错误数:    %llu\n", (unsigned long long)dif_stats.crc_errors);
+        printf("  应用标签错误: %llu\n", (unsigned long long)dif_stats.app_tag_errors);
+        printf("  参考标签错误: %llu\n", (unsigned long long)dif_stats.ref_tag_errors);
+        printf("  获取 DIF 统计: ✅ 通过\n");
+    } else {
+        printf("  获取 DIF 统计: ❌ 失败 (ret=%d)\n", ret);
+        pass = 0;
+    }
+
+    printf("\n========================================\n");
+    printf("    企业级特性测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
+    printf("========================================\n");
+
+    return pass ? 0 : -1;
+}
+
+/* ============================================================
  *  主函数
  * ============================================================ */
 
@@ -915,6 +1139,11 @@ int main(int argc, char *argv[])
     /* 运行 RAID 测试 */
     if (result == 0) {
         result = run_raid_test();
+    }
+
+    /* 运行企业级特性测试（NVMe Admin、SMART、PLP、DIF） */
+    if (result == 0) {
+        result = test_enterprise_features();
     }
 
     /* 运行主循环 */

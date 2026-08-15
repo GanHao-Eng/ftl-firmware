@@ -1,7 +1,8 @@
 /**
  * @file utils.c
  * @brief 工具函数实现
- * @details 企业级固件的通用工具函数实现
+ * @details 企业级固件的通用工具函数实现，包括内存安全操作、字符串处理、
+ *          延时函数、CRC校验和版本信息管理
  */
 
 #include "utils.h"
@@ -12,6 +13,12 @@
  *  CRC32 查表法
  * ============================================================ */
 
+/**
+ * @brief CRC32 查找表（多项式 0xEDB88320，即标准以太网CRC32）
+ * @details 预计算的256项查找表，用于加速CRC32计算
+ *          生成多项式：x^32 + x^26 + x^23 + x^22 + x^16 + x^12 + x^11 +
+ *                      x^10 + x^8 + x^7 + x^5 + x^4 + x^2 + x + 1
+ */
 static const uint32_t g_crc32_table[256] = {
     0x00000000U, 0x77073096U, 0xEE0E612CU, 0x990951BAU,
     0x076DC419U, 0x706AF48FU, 0xE963A535U, 0x9E6495A3U,
@@ -83,61 +90,109 @@ static const uint32_t g_crc32_table[256] = {
  *  版本信息
  * ============================================================ */
 
+/**
+ * @brief 固件版本信息全局实例
+ * @details 编译时自动填充构建日期和时间，用于版本追踪和固件升级判断
+ */
 static const firmware_version_t g_version = {
-    .major = 1,
-    .minor = 0,
-    .patch = 0,
-    .build = 1,
-    .name = "FTL Firmware",
-    .date = __DATE__,
-    .time = __TIME__
+    .major = 1,           ///< 主版本号（不兼容修改时递增）
+    .minor = 0,           ///< 次版本号（功能新增时递增）
+    .patch = 0,           ///< 修订号（Bug修复时递增）
+    .build = 1,           ///< 构建号（每次构建递增）
+    .name = "FTL Firmware", ///< 固件名称
+    .date = __DATE__,     ///< 编译日期（由预处理器自动填充）
+    .time = __TIME__      ///< 编译时间（由预处理器自动填充）
 };
 
 /* ============================================================
  *  内存操作工具
  * ============================================================ */
 
+/**
+ * @brief 安全内存拷贝（带边界检查）
+ * @param[out] dst 目标缓冲区指针
+ * @param[in] dst_size 目标缓冲区大小（字节）
+ * @param[in] src 源数据指针
+ * @param[in] src_size 源数据大小（字节）
+ * @retval RET_OK 拷贝成功
+ * @retval RET_ERR_PARAM 参数错误（空指针）
+ * @retval RET_ERR_OVERWRITE 目标缓冲区不足，防止缓冲区溢出
+ * @details 企业级安全内存拷贝，在执行memcpy前检查目标缓冲区大小，
+ *          防止缓冲区溢出漏洞。这是CERT C安全编码标准的推荐做法。
+ */
 ret_code_t utils_memcpy_safe(void *dst, uint32_t dst_size, const void *src, uint32_t src_size)
 {
+    /* 空指针检查 */
     if (dst == NULL || src == NULL) {
         return RET_ERR_PARAM;
     }
+
+    /* 边界检查：目标缓冲区必须能容纳源数据 */
     if (dst_size < src_size) {
         return RET_ERR_OVERWRITE;
     }
 
+    /* 执行内存拷贝 */
     memcpy(dst, src, src_size);
 
     return RET_OK;
 }
 
+/**
+ * @brief 安全字符串拷贝（带边界检查和自动终止）
+ * @param[out] dst 目标字符串缓冲区
+ * @param[in] dst_size 目标缓冲区大小（字节，包含终止符空间）
+ * @param[in] src 源字符串指针
+ * @retval RET_OK 拷贝成功
+ * @retval RET_ERR_PARAM 参数错误（空指针）
+ * @retval RET_ERR_OVERWRITE 目标缓冲区不足
+ * @details 安全字符串拷贝，确保目标字符串始终以'\0'终止，
+ *          防止字符串溢出和未终止字符串导致的安全问题。
+ */
 ret_code_t utils_strcpy_safe(char *dst, uint32_t dst_size, const char *src)
 {
     uint32_t src_len = 0;
 
+    /* 空指针检查 */
     if (dst == NULL || src == NULL) {
         return RET_ERR_PARAM;
     }
 
+    /* 计算源字符串长度（限制在目标缓冲区大小内） */
     src_len = utils_strnlen(src, dst_size);
+
+    /* 检查是否有足够空间存放字符串和终止符 */
     if (src_len >= dst_size) {
         return RET_ERR_OVERWRITE;
     }
 
+    /* 拷贝字符串内容 */
     memcpy(dst, src, src_len);
+
+    /* 确保字符串以'\0'终止 */
     dst[src_len] = '\0';
 
     return RET_OK;
 }
 
+/**
+ * @brief 安全字符串长度计算（限制最大长度）
+ * @param[in] str 字符串指针
+ * @param[in] max_len 最大扫描长度
+ * @return 字符串长度（不超过max_len）
+ * @details 计算字符串长度，但最多扫描max_len个字节，
+ *          防止对未终止字符串的无限扫描导致的越界访问。
+ */
 uint32_t utils_strnlen(const char *str, uint32_t max_len)
 {
     uint32_t len = 0;
 
+    /* 空指针返回0 */
     if (str == NULL) {
         return 0U;
     }
 
+    /* 扫描字符串，直到遇到'\0'或达到最大长度 */
     while (len < max_len && str[len] != '\0') {
         len++;
     }
@@ -149,26 +204,39 @@ uint32_t utils_strnlen(const char *str, uint32_t max_len)
  *  时间工具
  * ============================================================ */
 
+/**
+ * @brief 毫秒级延时
+ * @param[in] ms 延时毫秒数
+ * @note 简化实现，使用空循环模拟延时。实际固件中应使用硬件定时器
+ *       或RTOS的延时函数，以避免CPU忙等和延时不准确的问题。
+ */
 void utils_delay_ms(uint32_t ms)
 {
-    /* 简化实现，实际固件中使用硬件定时器 */
     volatile uint32_t i = 0;
     volatile uint32_t j = 0;
 
+    /* 外层循环：毫秒计数 */
     for (i = 0; i < ms; i++) {
+        /* 内层循环：模拟1毫秒的空循环（约1000次迭代） */
         for (j = 0; j < 1000U; j++) {
-            /* 空循环延时 */
+            /* 空循环延时，volatile防止编译器优化掉 */
         }
     }
 }
 
+/**
+ * @brief 微秒级延时
+ * @param[in] us 延时微秒数
+ * @note 简化实现，使用空循环模拟延时。实际精度取决于CPU主频，
+ *       企业级固件应使用硬件定时器或高精度延时函数。
+ */
 void utils_delay_us(uint32_t us)
 {
-    /* 简化实现，实际固件中使用硬件定时器 */
     volatile uint32_t i = 0;
 
+    /* 空循环模拟微秒级延时 */
     for (i = 0; i < us; i++) {
-        /* 空循环延时 */
+        /* 空循环延时，volatile防止编译器优化掉 */
     }
 }
 
@@ -176,38 +244,66 @@ void utils_delay_us(uint32_t us)
  *  CRC 工具
  * ============================================================ */
 
+/**
+ * @brief 计算CRC32校验值（查表法）
+ * @param[in] data 数据缓冲区指针
+ * @param[in] len 数据长度（字节）
+ * @return CRC32校验值（32位）
+ * @details 使用标准以太网CRC32算法（多项式0xEDB88320），
+ *          采用查表法加速计算。初始值0xFFFFFFFF，结果取反。
+ *          广泛用于数据完整性校验、ZIP、PNG等格式。
+ */
 uint32_t utils_crc32(const uint8_t *data, uint32_t len)
 {
-    uint32_t crc = 0xFFFFFFFFU;
+    uint32_t crc = 0xFFFFFFFFU;  /* CRC初始值（全1） */
     uint32_t i = 0;
 
+    /* 空指针或零长度返回0 */
     if (data == NULL || len == 0U) {
         return 0U;
     }
 
+    /* 逐字节计算CRC，使用查找表加速 */
     for (i = 0; i < len; i++) {
+        /* 低8位与数据异或作为表索引，查表后与CRC高24位异或 */
         crc = g_crc32_table[(crc ^ data[i]) & 0xFFU] ^ (crc >> 8);
     }
 
+    /* 最终结果取反 */
     return crc ^ 0xFFFFFFFFU;
 }
 
+/**
+ * @brief 计算CRC16校验值（Modbus RTU标准）
+ * @param[in] data 数据缓冲区指针
+ * @param[in] len 数据长度（字节）
+ * @return CRC16校验值（16位）
+ * @details 使用Modbus RTU标准CRC16算法（多项式0xA001，即0x8005的反转），
+ *          初始值0xFFFF。逐位计算，适用于工业通信、Modbus协议等场景。
+ */
 uint16_t utils_crc16(const uint8_t *data, uint32_t len)
 {
-    uint16_t crc = 0xFFFFU;
+    uint16_t crc = 0xFFFFU;  /* CRC初始值（全1） */
     uint32_t i = 0;
     uint32_t j = 0;
 
+    /* 空指针或零长度返回0 */
     if (data == NULL || len == 0U) {
         return 0U;
     }
 
+    /* 逐字节计算 */
     for (i = 0; i < len; i++) {
+        /* 数据字节与CRC低8位异或 */
         crc ^= (uint16_t)data[i];
+
+        /* 逐位处理（8位） */
         for (j = 0; j < 8U; j++) {
+            /* 如果最低位为1，右移后异或多项式0xA001 */
             if (crc & 0x0001U) {
                 crc = (crc >> 1) ^ 0xA001U;
             } else {
+                /* 最低位为0，直接右移 */
                 crc >>= 1;
             }
         }
@@ -217,23 +313,40 @@ uint16_t utils_crc16(const uint8_t *data, uint32_t len)
 }
 
 /* ============================================================
- *  版本信息
+ *  版本信息接口
  * ============================================================ */
 
+/**
+ * @brief 获取固件版本信息
+ * @return 固件版本信息结构体指针
+ * @details 返回只读的版本信息结构体，包含主版本、次版本、修订号、
+ *          构建号、固件名称、编译日期和时间。用于版本查询和
+ *          固件升级兼容性判断。
+ */
 const firmware_version_t *utils_get_version(void)
 {
     return &g_version;
 }
 
+/**
+ * @brief 打印固件版本信息到控制台
+ * @details 以格式化方式打印固件名称、版本号、构建号和编译时间，
+ *          用于启动时的版本显示和调试信息输出。
+ */
 void utils_print_version(void)
 {
+    /* 打印版本横幅 */
     printf("========================================\n");
+
+    /* 打印固件名称和版本号 */
     printf("  %s v%u.%u.%u (build %u)\n",
            g_version.name,
            g_version.major,
            g_version.minor,
            g_version.patch,
            g_version.build);
+
+    /* 打印构建日期和时间 */
     printf("  Build: %s %s\n", g_version.date, g_version.time);
     printf("========================================\n");
 }

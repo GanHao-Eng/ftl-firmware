@@ -609,11 +609,7 @@ static void host_if_fill_smart_log(void)
         smart->critical_warning |= 0x02;  /* 温度过高 */
     }
 
-    /* 寿命估算（基于擦写次数，简化计算） */
-    uint32_t max_erase = 0;
-    for (uint32_t i = 0; i < NAND_TOTAL_BLOCKS; i++) {
-        /* 简化：假设平均擦写次数 */
-    }
+    /* 寿命估算（简化：固定值，实际应基于NAND擦写次数统计） */
     smart->percent_used = 5;  /* 已使用5%寿命 */
     if (smart->percent_used > 90) {
         smart->critical_warning |= 0x04;  /* 可靠性降级 */

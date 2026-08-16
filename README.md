@@ -180,15 +180,15 @@ ftl-firmware/
 - ✅ 坏块自动替换
 
 ### 主机接口模块
-- ✅ NVMe 命令模拟
-- ✅ 提交队列（SQ）
-- ✅ 完成队列（CQ）
+- ✅ NVMe 1.4 协议栈
+- ✅ NVMe/TCP 目标端（与 Linux 内核 nvme-tcp 驱动完整对接）
+- ✅ 提交队列（SQ）/ 完成队列（CQ）
 - ✅ 阶段标签（Phase Tag）
-- ✅ 命令优先级
-- ✅ 统计信息
-- ✅ Write Zeroes 命令支持
-- ✅ Flush 命令支持
-- ✅ Dataset Management (TRIM) 命令支持
+- ✅ Admin 命令：Identify、Get Log Page、Set Features、Keep Alive
+- ✅ I/O 命令：Read、Write、Write Zeroes、Flush、Dataset Management(TRIM)
+- ✅ Fabric Command：Property Set/Get、Connect
+- ✅ 多队列支持（Admin + 2 个 I/O 队列）
+- ✅ 真实数据持久化（Write→FTL→NAND，Read→NAND→FTL→主机）
 
 ### 管理模块
 - ✅ 模块初始化/销毁
@@ -282,6 +282,137 @@ make test
 
 # 运行测试
 make runtest
+```
+
+## NVMe/TCP 目标端使用指南
+
+本固件实现了完整的 NVMe/TCP 目标端，可与 Linux 内核 `nvme-tcp` 主机驱动直接对接，实现真实的块设备读写。
+
+### 架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Linux 主机 (nvme-cli / dd / fio)                    │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  nvme-tcp 内核驱动 (TCP 4420)                  │  │
+│  └───────────────────┬────────────────────────────┘  │
+└──────────────────────┼───────────────────────────────┘
+                       │ TCP
+┌──────────────────────┼───────────────────────────────┐
+│  ftl-firmware         ▼                              │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  NVMe/TCP 目标端 (nvme_tcp_target.c)           │  │
+│  │  IC握手 → Connect → Admin队列 → I/O队列        │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │                               │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  NVMe 控制器 (nvme_controller.c)               │  │
+│  │  Identify / Set Features / Keep Alive          │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │                               │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  FTL 层 (ftl.c)  →  NAND 层 (nand.c)          │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### 支持的 NVMe 命令
+
+| 类型 | 操作码 | 命令 | 说明 |
+|------|--------|------|------|
+| Admin | 0x06 | Identify | Controller / Namespace |
+| Admin | 0x02 | Get Log Page | SMART/Health (LID=0x02) |
+| Admin | 0x09 | Set Features | Number of Queues, Keep Alive |
+| Admin | 0x18 | Keep Alive | 保活命令 |
+| Fabric | 0x7F | Property Set/Get | 寄存器访问 |
+| Fabric | 0x7F | Connect | 建立队列连接 |
+| I/O | 0x00 | Flush | 刷新缓存 |
+| I/O | 0x01 | Write | 写数据（R2T+H2CData） |
+| I/O | 0x02 | Read | 读数据（C2HData） |
+| I/O | 0x08 | Write Zeroes | 写零 |
+| I/O | 0x09 | Dataset Management | TRIM |
+
+### 快速开始
+
+#### 1. 编译运行固件
+
+```bash
+cd ftl-firmware
+make
+./build/ftl_firmware
+# 固件监听 TCP 端口 4420，SubNQN: nqn.2026-08.io.ftlfw:subsystem
+```
+
+#### 2. 主机连接
+
+```bash
+# 加载 nvme-tcp 内核模块
+sudo modprobe nvme-tcp
+
+# 连接到目标端
+sudo nvme connect -t tcp -a 127.0.0.1 -s 4420 \
+    -n nqn.2026-08.io.ftlfw:subsystem
+
+# 验证设备
+sudo nvme list
+# /dev/nvme0n1 应出现，容量约 1GB，4K LBA
+```
+
+#### 3. 读写测试
+
+```bash
+# 写入测试
+dd if=/dev/urandom of=/tmp/test.bin bs=4096 count=16
+sudo dd if=/tmp/test.bin of=/dev/nvme0n1 bs=4096 count=16
+
+# 读回验证
+sudo dd if=/dev/nvme0n1 of=/tmp/verify.bin bs=4096 count=16
+md5sum /tmp/test.bin /tmp/verify.bin  # 应一致
+
+# Write Zeroes
+sudo nvme write-zeroes /dev/nvme0n1 --start-block=0 --block-count=15
+
+# TRIM
+sudo nvme dsm /dev/nvme0n1 --ad 1 --blocks=0,16
+```
+
+#### 4. fio 性能测试
+
+```bash
+# 顺序读
+sudo fio --name=seqread --filename=/dev/nvme0n1 --rw=read \
+    --bs=4k --size=1M --iodepth=1 --runtime=5 --time_based
+
+# 顺序写
+sudo fio --name=seqwrite --filename=/dev/nvme0n1 --rw=write \
+    --bs=4k --size=1M --iodepth=1 --runtime=5 --time_based
+
+# 随机读
+sudo fio --name=randread --filename=/dev/nvme0n1 --rw=randread \
+    --bs=4k --size=1M --iodepth=1 --runtime=5 --time_based
+```
+
+### 关键技术细节
+
+- **LBA 大小**: 4KB (LBAF0: ds=12, ms=0)
+- **命名空间容量**: 262144 LBA × 4KB = 1GB
+- **队列配置**: Admin 队列 + 2 个 I/O 队列
+- **NVMe 版本**: 1.4
+- **Connect QID 位置**: inline data byte 16-17 (Admin=0xFFFF→0, I/O=1+)
+- **未写入页读取**: 返回全零（符合 NVMe 规范）
+
+### 调试技巧
+
+```bash
+# 查看内核日志
+sudo dmesg | grep -i nvme
+
+# 查看固件日志（重定向到文件）
+./build/ftl_firmware > /tmp/fw.log 2>&1
+grep -E "ERROR|WARN|写命令|读命令|FTL" /tmp/fw.log
+
+# 抓包分析
+sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 ```
 
 ## IPC 消息队列
@@ -430,6 +561,17 @@ make runtest
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
 
 ## 版本历史
+
+### v2.0.0 (2026-08-16)
+- 实现完整 NVMe/TCP 目标端，与 Linux 内核 nvme-tcp 驱动对接成功
+- 实现 IC 握手、Connect、Admin 队列、I/O 队列完整协议栈
+- 实现 I/O Read/Write 真实数据路径（Write→FTL→NAND，Read→NAND→FTL→主机）
+- 实现 Write Zeroes、Dataset Management(TRIM) 命令
+- 实现 Identify Controller/Namespace、Get Log Page(SMART)、Set Features、Keep Alive
+- 修复 CapsuleResp phase bit、LBAF 布局、Connect QID 提取等关键协议问题
+- 多 LBA 读写验证通过，md5sum 一致
+- fio 性能测试通过（顺序读 6.7MB/s，顺序写 5.8MB/s）
+- 完善代码注释和文档
 
 ### v1.3.0 (2026-08-10)
 - 实现多线程支持（线程管理模块，基于 pthread）

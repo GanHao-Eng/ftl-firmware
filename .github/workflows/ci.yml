@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc make
+
+    - name: Build firmware
+      run: |
+        make clean
+        make all
+
+    - name: Build tests
+      run: |
+        make test
+
+    - name: Run FTL unit tests
+      run: |
+        ./build/test_ftl_unit
+
+    - name: Run GC benchmark
+      run: |
+        ./build/test_gc_benchmark
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ftl-firmware-build
+        path: |
+          build/ftl_firmware
+          build/test_ftl_unit
+          build/test_gc_benchmark
+        retention-days: 7

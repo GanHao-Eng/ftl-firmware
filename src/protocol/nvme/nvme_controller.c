@@ -14,7 +14,7 @@
  *          6. 主机写 CQ 头指针 Doorbell → nvme_ctrl_cq_doorbell()
  */
 
-#include "nvme_controller.h"
+#include "protocol/nvme_controller.h"
 #include "ftl.h"
 #include "log.h"
 #include <string.h>

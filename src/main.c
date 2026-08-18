@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "common/common.h"
 #include "msg_queue.h"
 #include "utils.h"
@@ -18,6 +19,8 @@
 #include "thread.h"
 #include "dma.h"
 #include "raid.h"
+#include "protocol/nvme_tcp_target.h"
+#include "protocol/nvme_controller.h"
 
 /* ============================================================
  *  全局配置
@@ -58,15 +61,18 @@ static int firmware_main_loop(void)
     int result = 0;
     uint32_t loop_count = 0U;
 
-    printf("\n[固件] 进入主循环...\n\n");
+    printf("\n[固件] 进入主循环（NVMe/TCP 服务模式）...\n\n");
 
-    /* 主循环 */
+    /* 主循环：无限运行，直到收到信号 */
     while (1) {
         /* 管理模块处理 */
         manager_process();
 
-        /* 主机接口处理 */
+        /* 主机接口处理（包含 NVMe/TCP 目标端） */
         host_if_process();
+
+        /* NVMe/TCP 目标端处理 */
+        nvme_tcp_target_process();
 
         /* 更新模块心跳（防止看门狗超时） */
         manager_send_heartbeat(MODULE_NAND);
@@ -74,19 +80,16 @@ static int firmware_main_loop(void)
         manager_send_heartbeat(MODULE_HOST_IF);
         manager_send_heartbeat(MODULE_LOG);
 
-        /* 打印状态（每 1000 次循环打印一次） */
+        /* 打印状态（每 10000 次循环打印一次） */
         loop_count++;
-        if (loop_count % 1000U == 0U) {
+        if (loop_count % 10000U == 0U) {
             printf("[固件] 主循环运行中... 循环次数: %u\n", loop_count);
             manager_print_module_status();
             printf("\n");
         }
 
-        /* 简化实现：运行一定次数后退出 */
-        if (loop_count >= 5000U) {
-            printf("[固件] 达到最大循环次数，退出\n");
-            break;
-        }
+        /* 短暂休眠，减少 CPU 占用 */
+        usleep(100);  /* 100 微秒 */
     }
 
     return result;
@@ -95,6 +98,9 @@ static int firmware_main_loop(void)
 /* ============================================================
  *  模块初始化
  * ============================================================ */
+
+/* 全局日志级别（默认 WARN，高性能模式） */
+static log_level_t g_log_level = LOG_LEVEL_WARN;
 
 /**
  * @brief 初始化所有模块
@@ -118,7 +124,7 @@ static ret_code_t init_all_modules(void)
 
     /* 初始化日志模块 */
     printf("[固件] 初始化日志模块...\n");
-    log_set_level(LOG_LEVEL_INFO);
+    log_set_level(g_log_level);
     printf("[固件] 日志模块初始化完成\n\n");
 
     /* 初始化 NAND 模块 */
@@ -150,6 +156,35 @@ static ret_code_t init_all_modules(void)
         return RET_ERR_INTERNAL;
     }
     printf("[固件] 主机接口模块初始化完成\n\n");
+
+    /* 初始化 NVMe 控制器 */
+    printf("[固件] 初始化 NVMe 控制器...\n");
+    ret = nvme_ctrl_init();
+    if (ret != RET_OK) {
+        printf("[固件] NVMe 控制器初始化失败\n");
+        host_if_deinit();
+        ftl_deinit();
+        nand_deinit();
+        return RET_ERR_INTERNAL;
+    }
+    printf("[固件] NVMe 控制器初始化完成\n\n");
+
+    /* 初始化 NVMe/TCP 目标端 */
+    printf("[固件] 初始化 NVMe/TCP 目标端...\n");
+    nvme_tcp_target_config_t tcp_config;
+    memset(&tcp_config, 0, sizeof(tcp_config));
+    tcp_config.port = 4420;
+    tcp_config.subnqn = "nqn.2026-08.io.ftlfw:subsystem";
+    tcp_config.maxh2cdata = 65536;
+    ret = nvme_tcp_target_init(&tcp_config);
+    if (ret != RET_OK) {
+        printf("[固件] NVMe/TCP 目标端初始化失败\n");
+        host_if_deinit();
+        ftl_deinit();
+        nand_deinit();
+        return RET_ERR_INTERNAL;
+    }
+    printf("[固件] NVMe/TCP 目标端初始化完成，监听端口 %u\n\n", tcp_config.port);
 
     /* 初始化管理模块 */
     printf("[固件] 初始化管理模块...\n");
@@ -193,6 +228,11 @@ static void deinit_all_modules(void)
     printf("[固件] 反初始化主机接口模块...\n");
     host_if_deinit();
     printf("[固件] 主机接口模块反初始化完成\n\n");
+
+    /* 反初始化 NVMe/TCP 目标端 */
+    printf("[固件] 反初始化 NVMe/TCP 目标端...\n");
+    nvme_tcp_target_deinit();
+    printf("[固件] NVMe/TCP 目标端反初始化完成\n\n");
 
     /* 反初始化 FTL 模块 */
     printf("[固件] 反初始化 FTL 模块...\n");
@@ -1098,10 +1138,16 @@ int main(int argc, char *argv[])
 {
     ret_code_t ret = RET_OK;
     int result = 0;
+    int i = 0;
 
-    /* 消除未使用参数警告 */
-    (void)argc;
-    (void)argv;
+    /* 解析命令行参数 */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--debug") == 0) {
+            g_log_level = LOG_LEVEL_INFO;
+        } else if (strcmp(argv[i], "--trace") == 0) {
+            g_log_level = LOG_LEVEL_DEBUG;
+        }
+    }
 
     /* 打印版本信息 */
     utils_print_version();
@@ -1109,6 +1155,10 @@ int main(int argc, char *argv[])
 
     /* 打印配置信息 */
     printf("固件配置:\n");
+    printf("  日志级别:     %s\n",
+           g_log_level == LOG_LEVEL_DEBUG ? "DEBUG" :
+           g_log_level == LOG_LEVEL_INFO ? "INFO" :
+           g_log_level == LOG_LEVEL_WARN ? "WARN" : "ERROR");
     printf("  心跳间隔:     %u ms\n", g_default_fw_config.heartbeat_interval_ms);
     printf("  健康检查间隔: %u ms\n", g_default_fw_config.health_check_interval_ms);
     printf("  看门狗超时:   %u ms\n", g_default_fw_config.watchdog_timeout_ms);
@@ -1123,33 +1173,8 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    /* 运行基础测试 */
-    result = run_basic_test();
-
-    /* 运行多线程测试 */
-    if (result == 0) {
-        result = run_thread_test();
-    }
-
-    /* 运行 DMA 测试 */
-    if (result == 0) {
-        result = run_dma_test();
-    }
-
-    /* 运行 RAID 测试 */
-    if (result == 0) {
-        result = run_raid_test();
-    }
-
-    /* 运行企业级特性测试（NVMe Admin、SMART、PLP、DIF） */
-    if (result == 0) {
-        result = test_enterprise_features();
-    }
-
-    /* 运行主循环 */
-    if (result == 0) {
-        result = firmware_main_loop();
-    }
+    /* 直接进入 NVMe/TCP 服务主循环 */
+    result = firmware_main_loop();
 
     /* 反初始化所有模块 */
     deinit_all_modules();

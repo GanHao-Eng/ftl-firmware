@@ -23,8 +23,8 @@
 #ifndef NVME_TCP_TARGET_H
 #define NVME_TCP_TARGET_H
 
-#include "common.h"
-#include "nvme_controller.h"
+#include "common/common.h"
+#include "protocol/nvme_controller.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -25,8 +25,8 @@
 
 #define _GNU_SOURCE
 
-#include "nvme_tcp_target.h"
-#include "nvme_controller.h"
+#include "protocol/nvme_tcp_target.h"
+#include "protocol/nvme_controller.h"
 #include "ftl.h"
 #include "log.h"
 #include <string.h>

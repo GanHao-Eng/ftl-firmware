@@ -30,6 +30,8 @@ TEST_DIR    = tests
 
 # 源文件
 CORE_SRCS = $(SRC_DIR)/main.c \
+            $(SRC_DIR)/protocol/nvme/nvme_controller.c \
+            $(SRC_DIR)/protocol/nvme/nvme_tcp_target.c \
             $(MODULES_DIR)/nand/nand.c \
             $(MODULES_DIR)/ftl/ftl.c \
             $(MODULES_DIR)/log/log.c \
@@ -48,7 +50,21 @@ CORE_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 TARGET = $(BUILD_DIR)/ftl_firmware
 
 # 测试目标
-TEST_TARGETS =
+TEST_TARGETS = $(BUILD_DIR)/test_gc_benchmark $(BUILD_DIR)/test_ftl_unit
+
+# GC 基准测试源文件（不含 main.c）
+GC_BENCH_SRCS = $(TEST_DIR)/test_gc_benchmark.c \
+                $(MODULES_DIR)/nand/nand.c \
+                $(MODULES_DIR)/ftl/ftl.c \
+                $(MODULES_DIR)/log/log.c
+GC_BENCH_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(GC_BENCH_SRCS))
+
+# FTL 单元测试源文件
+FTL_UNIT_SRCS = $(TEST_DIR)/test_ftl_unit.c \
+                $(MODULES_DIR)/nand/nand.c \
+                $(MODULES_DIR)/ftl/ftl.c \
+                $(MODULES_DIR)/log/log.c
+FTL_UNIT_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(FTL_UNIT_SRCS))
 
 # 默认目标
 all: $(BUILD_DIR) $(TARGET)
@@ -67,6 +83,8 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/$(MODULES_DIR)/raid
 	@mkdir -p $(BUILD_DIR)/$(IPC_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UTILS_DIR)
+	@mkdir -p $(BUILD_DIR)/$(TEST_DIR)
+	@mkdir -p $(BUILD_DIR)/$(SRC_DIR)/protocol/nvme
 
 # 编译目标文件
 $(BUILD_DIR)/%.o: %.c
@@ -77,6 +95,22 @@ $(BUILD_DIR)/%.o: %.c
 $(TARGET): $(CORE_OBJS)
 	@echo "  LD  $@"
 	@$(CC) $(CORE_OBJS) -o $@ $(LDFLAGS)
+	@echo ""
+	@echo "构建完成: $@"
+	@echo ""
+
+# GC 基准测试
+$(BUILD_DIR)/test_gc_benchmark: $(GC_BENCH_OBJS)
+	@echo "  LD  $@"
+	@$(CC) $(GC_BENCH_OBJS) -o $@ $(LDFLAGS)
+	@echo ""
+	@echo "构建完成: $@"
+	@echo ""
+
+# FTL 单元测试
+$(BUILD_DIR)/test_ftl_unit: $(FTL_UNIT_OBJS)
+	@echo "  LD  $@"
+	@$(CC) $(FTL_UNIT_OBJS) -o $@ $(LDFLAGS)
 	@echo ""
 	@echo "构建完成: $@"
 	@echo ""

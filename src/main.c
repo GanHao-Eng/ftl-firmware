@@ -26,6 +26,12 @@
  *  全局配置
  * ============================================================ */
 
+/** @brief FTL 元数据快照文件路径（掉电保护持久化） */
+#define FTL_SNAPSHOT_FILE  "ftl_snapshot.bin"
+
+/** @brief 快照保存间隔（每 N 次主循环保存一次） */
+#define FTL_SNAPSHOT_INTERVAL  5000U
+
 /**
  * @brief 固件默认配置
  */
@@ -88,6 +94,15 @@ static int firmware_main_loop(void)
             printf("\n");
         }
 
+        /* 掉电保护：定期保存 FTL 元数据快照
+         * 每 FTL_SNAPSHOT_INTERVAL 次循环保存一次，确保掉电后能恢复 */
+        if (loop_count % FTL_SNAPSHOT_INTERVAL == 0U) {
+            ret_code_t snap_ret = ftl_save_snapshot(FTL_SNAPSHOT_FILE);
+            if (snap_ret != RET_OK) {
+                LOG_WARN("FTL 快照保存失败: ret=%d", snap_ret);
+            }
+        }
+
         /* 短暂休眠，减少 CPU 占用 */
         usleep(100);  /* 100 微秒 */
     }
@@ -145,6 +160,18 @@ static ret_code_t init_all_modules(void)
         return RET_ERR_INTERNAL;
     }
     printf("[固件] FTL 模块初始化完成\n\n");
+
+    /* 掉电恢复：尝试从快照文件恢复元数据
+     * 如果快照存在且校验通过，则恢复映射表和统计信息
+     * 如果快照不存在或校验失败，则保持全新初始化状态 */
+    printf("[固件] 检查掉电恢复快照...\n");
+    ret = ftl_load_snapshot(FTL_SNAPSHOT_FILE);
+    if (ret == RET_OK) {
+        printf("[固件] 掉电恢复成功: 从 %s 恢复元数据\n", FTL_SNAPSHOT_FILE);
+    } else {
+        printf("[固件] 无有效快照，全新启动 (ret=%d)\n", ret);
+    }
+    printf("\n");
 
     /* 初始化主机接口模块 */
     printf("[固件] 初始化主机接口模块...\n");
@@ -233,6 +260,18 @@ static void deinit_all_modules(void)
     printf("[固件] 反初始化 NVMe/TCP 目标端...\n");
     nvme_tcp_target_deinit();
     printf("[固件] NVMe/TCP 目标端反初始化完成\n\n");
+
+    /* 反初始化 FTL 模块前，保存元数据快照（掉电保护） */
+    printf("[固件] 保存 FTL 元数据快照...\n");
+    {
+        ret_code_t snap_ret = ftl_save_snapshot(FTL_SNAPSHOT_FILE);
+        if (snap_ret == RET_OK) {
+            printf("[固件] 快照保存成功: %s\n", FTL_SNAPSHOT_FILE);
+        } else {
+            printf("[固件] 快照保存失败: ret=%d\n", snap_ret);
+        }
+    }
+    printf("\n");
 
     /* 反初始化 FTL 模块 */
     printf("[固件] 反初始化 FTL 模块...\n");

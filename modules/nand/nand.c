@@ -31,6 +31,7 @@ phy_block_t g_phy_blocks[NAND_TOTAL_BLOCKS];
 typedef struct {
     FILE *media_file;             ///< 模拟介质的文件句柄
     bool is_initialized;          ///< 初始化标志
+    bool is_new_media;            ///< 是否为全新介质（true=刚创建，false=已有数据）
     uint32_t total_read_pages;    ///< 总读取页数统计
     uint32_t total_write_pages;   ///< 总写入页数统计
     uint32_t reserved_count;      ///< 剩余预留块数量
@@ -128,10 +129,20 @@ ret_code_t nand_init(const char *file_path)
     /* 获取当前颗粒类型的参数 */
     init_bad_ratio = nand_get_init_bad_ratio(g_nand_dev.nand_type);
 
-    /* 打开模拟介质文件，读写二进制模式 */
-    g_nand_dev.media_file = fopen(file_path, "w+b");
+    /* 打开模拟介质文件
+     * - 文件不存在：使用 "w+b" 全新创建并格式化（模拟出厂空NAND）
+     * - 文件已存在：使用 "r+b" 保留已有数据（模拟掉电后重新上电）
+     * 这样掉电恢复测试中，NAND数据可以正确保留 */
+    g_nand_dev.media_file = fopen(file_path, "r+b");
     if (g_nand_dev.media_file == NULL) {
-        return RET_ERR_INTERNAL;
+        /* 文件不存在，全新创建 */
+        g_nand_dev.media_file = fopen(file_path, "w+b");
+        if (g_nand_dev.media_file == NULL) {
+            return RET_ERR_INTERNAL;
+        }
+        g_nand_dev.is_new_media = true;
+    } else {
+        g_nand_dev.is_new_media = false;
     }
 
     /* 预分配完整介质空间，模拟真实NAND容量（包含数据区和OOB区） */
@@ -156,8 +167,10 @@ ret_code_t nand_init(const char *file_path)
         g_phy_blocks[i].bad_type = BAD_BLOCK_INIT;
         (void)memset(g_phy_blocks[i].page_valid, 0, NAND_PAGES_PER_BLOCK);
 
-        /* 随机生成初始坏块（模拟出厂坏块） */
-        if ((rand() % 100U) < init_bad_ratio) {
+        /* 仅在全新介质时随机生成初始坏块（模拟出厂坏块）
+         * 恢复模式下不随机生成，因为坏块是出厂固定的，不会因重新上电而改变
+         * 真实场景应从NAND的OOB区域扫描坏块标记，此处简化处理 */
+        if (g_nand_dev.is_new_media && (rand() % 100U) < init_bad_ratio) {
             g_phy_blocks[i].state = BLOCK_BAD;
             g_phy_blocks[i].bad_type = BAD_BLOCK_INIT;
             init_bad_count++;
@@ -173,6 +186,36 @@ ret_code_t nand_init(const char *file_path)
     }
 
     g_nand_dev.is_initialized = true;
+
+    /* 恢复模式：扫描NAND文件OOB区域，重建页有效标记和块状态
+     * 因为g_phy_blocks是内存中的状态，重新初始化后会丢失
+     * 需要从持久化的OOB区域中恢复哪些页已写入 */
+    if (!g_nand_dev.is_new_media) {
+        uint32_t valid_pages = 0;
+        nand_oob_t oob;
+        long oob_offset = 0;
+
+        for (uint32_t blk = 0; blk < NAND_TOTAL_BLOCKS; blk++) {
+            if (g_phy_blocks[blk].state == BLOCK_BAD) {
+                continue;  /* 坏块跳过 */
+            }
+            for (uint32_t pg = 0; pg < NAND_PAGES_PER_BLOCK; pg++) {
+                oob_offset = nand_calc_oob_offset(blk, pg);
+                (void)fseek(g_nand_dev.media_file, oob_offset, SEEK_SET);
+                if (fread(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file) == 1) {
+                    if (oob.magic == NAND_OOB_MAGIC) {
+                        /* OOB魔数正确，说明该页已写入数据 */
+                        g_phy_blocks[blk].page_valid[pg] = 1U;
+                        g_phy_blocks[blk].valid_page_cnt++;
+                        g_phy_blocks[blk].state = BLOCK_USED;
+                        valid_pages++;
+                    }
+                }
+            }
+        }
+        LOG_INFO("NAND 恢复模式: 从OOB重建 %u 个有效页", valid_pages);
+    }
+
     LOG_INFO("NAND 初始化完成: 总块数=%u, 初始坏块=%u, 颗粒类型=%u",
              NAND_TOTAL_BLOCKS, init_bad_count, g_nand_dev.nand_type);
 
@@ -284,6 +327,17 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
 
     /* 写入一页数据 */
     (void)fwrite(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
+
+    /* 写入 OOB 区域（标记页已写入，用于掉电恢复时重建页状态） */
+    {
+        nand_oob_t oob;
+        (void)memset(&oob, 0, sizeof(nand_oob_t));
+        oob.magic = NAND_OOB_MAGIC;
+        oob.bad_block_mark = 0xFF;  /* 0xFF 表示正常块 */
+        (void)fseek(g_nand_dev.media_file, offset + NAND_PAGE_SIZE, SEEK_SET);
+        (void)fwrite(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file);
+    }
+
     (void)fflush(g_nand_dev.media_file);
 
     /* 更新块元数据：标记页有效，有效页计数+1，块状态改为已使用 */

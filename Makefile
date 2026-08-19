@@ -50,7 +50,7 @@ CORE_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 TARGET = $(BUILD_DIR)/ftl_firmware
 
 # 测试目标
-TEST_TARGETS = $(BUILD_DIR)/test_gc_benchmark $(BUILD_DIR)/test_ftl_unit
+TEST_TARGETS = $(BUILD_DIR)/test_gc_benchmark $(BUILD_DIR)/test_ftl_unit $(BUILD_DIR)/test_plp_recovery
 
 # GC 基准测试源文件（不含 main.c）
 GC_BENCH_SRCS = $(TEST_DIR)/test_gc_benchmark.c \
@@ -65,6 +65,13 @@ FTL_UNIT_SRCS = $(TEST_DIR)/test_ftl_unit.c \
                 $(MODULES_DIR)/ftl/ftl.c \
                 $(MODULES_DIR)/log/log.c
 FTL_UNIT_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(FTL_UNIT_SRCS))
+
+# PLP 掉电恢复测试源文件
+PLP_RECOVERY_SRCS = $(TEST_DIR)/test_plp_recovery.c \
+                    $(MODULES_DIR)/nand/nand.c \
+                    $(MODULES_DIR)/ftl/ftl.c \
+                    $(MODULES_DIR)/log/log.c
+PLP_RECOVERY_OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(PLP_RECOVERY_SRCS))
 
 # 默认目标
 all: $(BUILD_DIR) $(TARGET)
@@ -111,6 +118,14 @@ $(BUILD_DIR)/test_gc_benchmark: $(GC_BENCH_OBJS)
 $(BUILD_DIR)/test_ftl_unit: $(FTL_UNIT_OBJS)
 	@echo "  LD  $@"
 	@$(CC) $(FTL_UNIT_OBJS) -o $@ $(LDFLAGS)
+	@echo ""
+	@echo "构建完成: $@"
+	@echo ""
+
+# PLP 掉电恢复测试
+$(BUILD_DIR)/test_plp_recovery: $(PLP_RECOVERY_OBJS)
+	@echo "  LD  $@"
+	@$(CC) $(PLP_RECOVERY_OBJS) -o $@ $(LDFLAGS)
 	@echo ""
 	@echo "构建完成: $@"
 	@echo ""

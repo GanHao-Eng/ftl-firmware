@@ -161,10 +161,11 @@ ftl-firmware/
 - ✅ 读干扰管理
 - ✅ CRC32 校验
 - ✅ ECC 纠错（汉明码、BCH 码、LDPC 码）
-- ✅ OOB 区域管理
+- ✅ OOB 区域管理（magic标记页有效性，支持掉电恢复时扫描重建页状态）
 - ✅ 多颗粒类型支持（SLC/MLC/TLC/QLC）
 - ✅ 功耗模拟
 - ✅ 预留块池
+- ✅ 掉电恢复模式（文件已存在时保留数据，扫描OOB重建页有效标记）
 
 ### FTL 模块
 - ✅ L2P 页映射
@@ -174,8 +175,8 @@ ftl-firmware/
 - ✅ 静态磨损均衡
 - ✅ TRIM/Discard 支持
 - ✅ 读干扰处理
-- ✅ 掉电保护（元数据快照）
-- ✅ WAL 写前日志
+- ✅ 掉电保护（PLP）：元数据快照自动持久化，启动自动恢复，定期快照保存，退出前快照保存
+- ✅ WAL 写前日志（写入前记录映射变更，支持日志重放恢复）
 - ✅ 混合映射（热数据页映射，冷数据块映射）
 - ✅ 坏块自动替换
 
@@ -280,8 +281,13 @@ make help
 # 构建测试
 make test
 
-# 运行测试
+# 运行所有测试
 make runtest
+
+# 单独运行
+./build/test_ftl_unit       # FTL 层单元测试（25项）
+./build/test_gc_benchmark   # 6种GC算法性能对比
+./build/test_plp_recovery   # 掉电保护恢复测试（4项）
 ```
 
 ## NVMe/TCP 目标端使用指南
@@ -561,6 +567,16 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
 
 ## 版本历史
+
+### v2.1.0 (2026-08-19)
+- 集成掉电保护（PLP）自动恢复流程：启动自动从快照恢复、主循环每5000次循环保存快照、退出前保存快照
+- 新增 PLP 掉电恢复测试（test_plp_recovery），25项测试100%通过，覆盖快照保存/加载、覆盖写恢复、TRIM恢复、快照不存在容错
+- NAND层：恢复模式下不随机生成坏块（坏块出厂固定），扫描OOB区域magic字段重建page_valid和块状态
+- NAND层：修复nand_page_write只写数据区未写OOB的bug，写入时同时写入OOB magic标记页有效
+- FTL层：完善元数据快照机制，L2P映射表持久化+校验和验证+反向映射表重建
+- GitHub Actions CI 增加 PLP 测试自动执行
+- 修复test_ftl_unit.c未使用变量编译警告
+- 完善代码注释和文档
 
 ### v2.0.0 (2026-08-16)
 - 实现完整 NVMe/TCP 目标端，与 Linux 内核 nvme-tcp 驱动对接成功

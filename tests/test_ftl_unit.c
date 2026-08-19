@@ -160,7 +160,6 @@ static void test_overwrite(void)
     uint8_t buf1[TEST_PAGE_SIZE];
     uint8_t buf2[TEST_PAGE_SIZE];
     uint8_t read_buf[TEST_PAGE_SIZE];
-    uint32_t i = 0;
 
     printf("\n=== test_overwrite ===\n");
 

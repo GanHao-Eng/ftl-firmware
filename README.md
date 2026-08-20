@@ -1,4 +1,4 @@
-# FTL 固件（企业级架构版本）
+# NVMe SSD固件开发：FTL算法栈与NVMe/TCP协议栈实现
 
 一套完整的SSD固件参考实现，涵盖NAND闪存抽象层、FTL闪存转换层、NVMe控制器及NVMe/TCP目标端协议栈，可与Linux内核nvme-tcp驱动真实对接，支持nvme-cli、fio等标准存储工具的功能验证与性能测试。
 

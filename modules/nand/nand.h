@@ -211,6 +211,7 @@ typedef struct {
     uint32_t erase_count;              ///< 块擦写次数（磨损计数）
     uint32_t valid_page_cnt;           ///< 块内有效页数量
     uint32_t read_count;               ///< 块读取次数（读干扰检测用）
+    uint8_t  need_reclaim;             ///< 读干扰标记：1=需要回收(read reclaim)
     bad_block_type_t bad_type;         ///< 坏块类型（仅坏块有效）
     uint8_t  page_valid[NAND_PAGES_PER_BLOCK];  ///< 页有效位图：1=有效，0=无效
 } phy_block_t;
@@ -451,6 +452,17 @@ uint32_t nand_get_block_read_count(uint32_t block);
  * @retval RET_ERR_PARAM 参数非法
  */
 ret_code_t nand_reset_block_read_count(uint32_t block);
+
+/**
+ * @brief 模拟数据保留(Data Retention)错误注入
+ * @param[in] block 物理块号
+ * @param[in] error_rate 错误率（0-100，每100字节翻转的位数）
+ * @return 实际注入的错误位数，参数非法返回0
+ * @note 模拟高温/长时间存储后NAND浮栅电子泄漏导致的位错误
+ *       真实SSD中数据保留错误率随温度和时间指数增长
+ *       注入错误后可通过ECC纠错验证数据恢复能力
+ */
+uint32_t nand_inject_retention_errors(uint32_t block, uint32_t error_rate);
 
 /**
  * @brief 检查是否有块需要读干扰处理

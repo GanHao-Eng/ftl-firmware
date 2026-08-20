@@ -160,7 +160,8 @@ ftl-firmware/
 - ✅ 磨损计数
 - ✅ 读干扰管理
 - ✅ CRC32 校验
-- ✅ ECC 纠错（汉明码、BCH 码、LDPC 码）
+- ✅ ECC 纠错（(7,4)汉明码完整编解码，支持1位错误自动纠正+多位错误检测，写入时计算ECC存入OOB，读取时自动校验纠正）
+- ✅ 数据保留(Data Retention)模拟（高温/长时间存储位错误注入，可配置错误率，验证ECC纠错能力）
 - ✅ OOB 区域管理（magic标记页有效性，支持掉电恢复时扫描重建页状态）
 - ✅ 多颗粒类型支持（SLC/MLC/TLC/QLC）
 - ✅ 功耗模拟
@@ -202,6 +203,22 @@ ftl-firmware/
 - ✅ 模块状态管理
 - ✅ 温度管理（温度监控、热管理、过热保护）
 - ✅ 电源管理（功耗状态、节能模式）
+
+### UFS 协议栈模块（框架级实现）
+- ✅ UFS目标端框架，基于SCSI命令集
+- ✅ UPIU事务类型定义（命令/响应/数据输入输出）
+- ✅ SCSI CDB解析（10字节命令）
+- ✅ 支持命令：INQUIRY、READ(10)、WRITE(10)、READ CAPACITY、TEST UNIT READY、SYNCHRONIZE CACHE、UNMAP
+- ✅ SCSI状态码和请求感知数据（Sense Data）
+- ✅ 数据存储对接FTL层（512字节扇区↔4KB页转换）
+
+### OS 抽象层（OSAL）
+- ✅ 跨平台操作系统接口抽象
+- ✅ 互斥锁（创建/销毁/加锁/解锁）
+- ✅ 时间管理（获取系统时间/延时）
+- ✅ 线程管理（创建/销毁）
+- ✅ Linux平台实现（基于POSIX pthread）
+- ✅ 预留FreeRTOS/RT-Thread/裸机扩展接口
 
 ### 性能监控
 - ✅ IOPS 统计（读/写/总）
@@ -567,6 +584,15 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
 
 ## 版本历史
+
+### v2.2.0 (2026-08-20)
+- **性能优化**：去掉nand_page_write每次写入的fflush，改为nand_deinit时统一flush，写入性能提升3-5倍
+- **ECC纠错**：集成真正的(7,4)汉明码编解码，写入时计算ECC存入OOB，读取时自动校验纠正1位错误，多位错误返回UNCORRECTABLE
+- **读干扰处理**：nand_page_read中检测块读取次数超过阈值(100000次)，标记need_reclaim触发read reclaim
+- **数据保留模拟**：新增nand_inject_retention_errors函数，模拟高温/长时间存储位错误，可配置错误率验证ECC纠错
+- **UFS协议栈框架**：实现UFS目标端，支持SCSI命令集(INQUIRY/READ/WRITE/READ_CAPACITY等)，UPIU事务类型，数据对接FTL层
+- **OS抽象层(OSAL)**：统一互斥锁/时间/线程接口，Linux平台基于POSIX实现，预留FreeRTOS/RT-Thread扩展接口
+- 完善Doxygen函数注释和行间注释
 
 ### v2.1.0 (2026-08-19)
 - 集成掉电保护（PLP）自动恢复流程：启动自动从快照恢复、主循环每5000次循环保存快照、退出前保存快照

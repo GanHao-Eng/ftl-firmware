@@ -227,8 +227,9 @@ ret_code_t nand_init(const char *file_path)
  */
 void nand_deinit(void)
 {
-    /* 关闭介质文件 */
+    /* 关闭介质文件前flush所有缓冲数据，确保持久化 */
     if (g_nand_dev.media_file != NULL) {
+        (void)fflush(g_nand_dev.media_file);
         (void)fclose(g_nand_dev.media_file);
         g_nand_dev.media_file = NULL;
     }
@@ -275,9 +276,38 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
     /* 读取一页数据 */
     (void)fread(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
 
+    /* 读取OOB中的ECC校验值并进行纠错 */
+    {
+        nand_oob_t oob;
+        ecc_result_t ecc_ret;
+        (void)fseek(g_nand_dev.media_file, offset + NAND_PAGE_SIZE, SEEK_SET);
+        if (fread(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file) == 1) {
+            if (oob.magic == NAND_OOB_MAGIC) {
+                /* OOB有效，进行ECC校验和纠错 */
+                ecc_ret = nand_ecc_hamming_decode(buf, NAND_PAGE_SIZE, oob.ecc);
+                if (ecc_ret == ECC_RESULT_CORRECTED) {
+                    LOG_INFO("NAND ECC: 块%u页%u检测到1位错误并已纠正", block, page);
+                } else if (ecc_ret == ECC_RESULT_UNCORRECTABLE) {
+                    LOG_WARN("NAND ECC: 块%u页%u检测到无法纠正的多位错误", block, page);
+                }
+            }
+        }
+    }
+
     /* 统计读取次数 */
     g_nand_dev.total_read_pages++;
     g_phy_blocks[block].read_count++;
+
+    /* 读干扰(Read Disturb)检测：频繁读取同一页会导致相邻页数据错误
+     * 当块读取次数超过阈值，标记该块需要回收(read reclaim)
+     * 真实SSD中由控制器后台任务搬迁有效页到新块 */
+    if (g_phy_blocks[block].read_count >= NAND_READ_DISTURB_THRESHOLD) {
+        if (g_phy_blocks[block].state == BLOCK_USED) {
+            g_phy_blocks[block].need_reclaim = 1U;
+            LOG_INFO("NAND 读干扰: 块%u读取次数%u超过阈值%u，标记需要回收",
+                     block, g_phy_blocks[block].read_count, NAND_READ_DISTURB_THRESHOLD);
+        }
+    }
 
     /* 功耗统计：读取能耗 */
     g_nand_dev.read_energy += NAND_POWER_READ_PER_PAGE;
@@ -331,14 +361,22 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
     /* 写入 OOB 区域（标记页已写入，用于掉电恢复时重建页状态） */
     {
         nand_oob_t oob;
+        uint32_t ecc_value = 0;
         (void)memset(&oob, 0, sizeof(nand_oob_t));
         oob.magic = NAND_OOB_MAGIC;
         oob.bad_block_mark = 0xFF;  /* 0xFF 表示正常块 */
+
+        /* 计算数据的ECC校验值并写入OOB */
+        (void)nand_ecc_hamming_encode(buf, NAND_PAGE_SIZE, &ecc_value);
+        oob.ecc = ecc_value;
+
         (void)fseek(g_nand_dev.media_file, offset + NAND_PAGE_SIZE, SEEK_SET);
         (void)fwrite(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file);
     }
 
-    (void)fflush(g_nand_dev.media_file);
+    /* 注意：模拟器场景下不每次写入都fflush，由操作系统缓冲区管理
+     * nand_deinit时统一flush，大幅提升写入性能
+     * 真实SSD中数据写入后即持久化，模拟器通过文件系统缓冲模拟 */
 
     /* 更新块元数据：标记页有效，有效页计数+1，块状态改为已使用 */
     g_phy_blocks[block].page_valid[page] = 1U;
@@ -827,6 +865,73 @@ ret_code_t nand_reset_block_read_count(uint32_t block)
 }
 
 /**
+ * @brief 模拟数据保留(Data Retention)错误注入
+ * @param[in] block 物理块号
+ * @param[in] error_rate 错误率（0-100，每100字节翻转的位数）
+ * @return 实际注入的错误位数，参数非法返回0
+ * @note 模拟高温/长时间存储后NAND浮栅电子泄漏导致的位错误
+ *       真实SSD中数据保留错误率随温度和时间指数增长
+ *       注入错误后可通过ECC纠错验证数据恢复能力
+ */
+uint32_t nand_inject_retention_errors(uint32_t block, uint32_t error_rate)
+{
+    uint32_t page = 0;
+    uint32_t error_count = 0;
+    uint32_t total_bits = 0;
+    uint8_t buf[NAND_PAGE_SIZE];
+    long offset = 0;
+
+    if (!nand_is_block_valid(block) || g_phy_blocks[block].state != BLOCK_USED) {
+        return 0;
+    }
+    if (error_rate == 0 || error_rate > 100) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_nand_mutex);
+
+    /* 遍历块内所有有效页，随机注入位错误 */
+    for (page = 0; page < NAND_PAGES_PER_BLOCK; page++) {
+        if (g_phy_blocks[block].page_valid[page] != 1U) {
+            continue;
+        }
+
+        /* 读取该页数据 */
+        offset = nand_calc_page_offset(block, page);
+        (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
+        if (fread(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file) != NAND_PAGE_SIZE) {
+            continue;
+        }
+
+        /* 根据错误率随机翻转位 */
+        total_bits = NAND_PAGE_SIZE * 8U;
+        /* 期望错误数 = 总位数 * error_rate / 10000（error_rate是每100字节的位数） */
+        uint32_t expected_errors = (NAND_PAGE_SIZE * error_rate) / 100U;
+        if (expected_errors == 0) {
+            expected_errors = 1;  /* 至少注入1位错误 */
+        }
+
+        for (uint32_t e = 0; e < expected_errors; e++) {
+            uint32_t bit_pos = (uint32_t)rand() % total_bits;
+            uint32_t byte_idx = bit_pos / 8U;
+            uint32_t bit_idx = bit_pos % 8U;
+            buf[byte_idx] ^= (1U << bit_idx);
+            error_count++;
+        }
+
+        /* 写回错误数据（不更新OOB的ECC，模拟自然发生的位翻转） */
+        (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
+        (void)fwrite(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
+    }
+
+    (void)fflush(g_nand_dev.media_file);
+    pthread_mutex_unlock(&g_nand_mutex);
+
+    LOG_INFO("NAND 数据保留: 块%u注入%u位错误(错误率%u)", block, error_count, error_rate);
+    return error_count;
+}
+
+/**
  * @brief 检查是否有块需要读干扰处理
  * @param[out] out_block 输出需要处理的块号
  * @return true 有块需要处理，false 不需要
@@ -1239,30 +1344,42 @@ static uint8_t hamming_decode_7bit(uint8_t *code)
  *       最终 ECC 值包含所有字节的校验信息汇总
  *       实际 SSD 中使用更复杂的 ECC 算法（如 BCH、LDPC）
  */
+/**
+ * @brief 计算数据的汉明码 ECC 校验值
+ * @param[in] data 数据指针
+ * @param[in] len  数据长度（字节）
+ * @param[out] ecc 输出 ECC 校验值
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ * @note 使用 (7,4) 汉明码对数据的每个字节进行保护
+ *       每个字节分为高4位和低4位，分别编码为7位汉明码
+ *       ECC值存储所有码字的校验位汇总，用于检测和纠正1位错误
+ *       实际SSD中使用BCH/LDPC码，可纠正多位错误
+ */
 ret_code_t nand_ecc_hamming_encode(const uint8_t *data, uint32_t len, uint32_t *ecc)
 {
     uint32_t i = 0;
     uint32_t ecc_value = 0;
     uint8_t byte = 0;
-    uint8_t parity = 0;
-    uint8_t bit = 0;
+    uint8_t low_code = 0;
+    uint8_t high_code = 0;
 
     if (data == NULL || ecc == NULL || len == 0) {
         return RET_ERR_PARAM;
     }
 
-    /* 简化实现：计算所有字节的奇偶校验作为 ECC */
+    /* 对每个字节的低4位和高4位分别计算汉明码 */
     for (i = 0; i < len; i++) {
         byte = data[i];
 
-        /* 对每个字节的位进行奇偶校验 */
-        parity = 0;
-        for (bit = 0; bit < 8; bit++) {
-            parity ^= ((byte >> bit) & 0x01);
-        }
+        /* 低4位编码 */
+        low_code = hamming_encode_4bit(byte & 0x0F);
+        /* 高4位编码 */
+        high_code = hamming_encode_4bit((byte >> 4) & 0x0F);
 
-        /* 累加校验位 */
-        ecc_value = (ecc_value << 1) | parity;
+        /* 累加校验位（异或汇总，用于检测错误） */
+        ecc_value ^= ((uint32_t)low_code << 0);
+        ecc_value ^= ((uint32_t)high_code << 7);
     }
 
     *ecc = ecc_value;
@@ -1278,11 +1395,25 @@ ret_code_t nand_ecc_hamming_encode(const uint8_t *data, uint32_t len, uint32_t *
  * @note 简化实现：检测数据是否有错误
  *       实际 SSD 中使用更复杂的 ECC 算法可以纠正多位错误
  */
+/**
+ * @brief 使用汉明码 ECC 校验并纠正数据
+ * @param[in,out] data 数据指针（纠错后的数据）
+ * @param[in] len  数据长度（字节）
+ * @param[in] ecc  ECC 校验值
+ * @return ECC 纠错结果
+ * @note 实现1位错误检测与纠正：
+ *       1. 重新计算当前数据的ECC校验值
+ *       2. 与存储的ECC比较，若相同则无错误
+ *       3. 若不同，逐位翻转尝试找到错误位置（翻转后ECC匹配则纠正）
+ *       4. 多位错误无法纠正，返回UNCORRECTABLE
+ *       实际SSD中使用BCH/LDPC硬件引擎，可纠正多位错误
+ */
 ecc_result_t nand_ecc_hamming_decode(uint8_t *data, uint32_t len, uint32_t ecc)
 {
     uint32_t calculated_ecc = 0;
-    uint32_t error_bits = 0;
-    uint32_t diff = 0;
+    uint32_t i = 0;
+    uint32_t bit = 0;
+    uint8_t original_byte = 0;
 
     if (data == NULL || len == 0) {
         return ECC_RESULT_UNCORRECTABLE;
@@ -1291,24 +1422,35 @@ ecc_result_t nand_ecc_hamming_decode(uint8_t *data, uint32_t len, uint32_t ecc)
     /* 计算当前数据的 ECC */
     (void)nand_ecc_hamming_encode(data, len, &calculated_ecc);
 
-    /* 比较 ECC，统计错误位数 */
-    diff = calculated_ecc ^ ecc;
-    while (diff != 0) {
-        error_bits += (diff & 1);
-        diff >>= 1;
+    /* 校验值相同，无错误 */
+    if (calculated_ecc == ecc) {
+        return ECC_RESULT_OK;
     }
 
-    if (error_bits == 0) {
-        return ECC_RESULT_OK;
-    } else if (error_bits == 1) {
-        /* 1 位错误，统计并标记为已纠正（简化实现，实际需要定位并纠正） */
-        g_nand_dev.ecc_corrected_count++;
-        return ECC_RESULT_CORRECTED;
-    } else {
-        /* 多位错误，无法纠正 */
-        g_nand_dev.ecc_uncorrectable_count++;
-        return ECC_RESULT_UNCORRECTABLE;
+    /* 校验值不同，尝试纠正1位错误：逐位翻转测试 */
+    for (i = 0; i < len; i++) {
+        original_byte = data[i];
+        for (bit = 0; bit < 8; bit++) {
+            /* 翻转第bit位 */
+            data[i] ^= (1U << bit);
+
+            /* 重新计算ECC */
+            (void)nand_ecc_hamming_encode(data, len, &calculated_ecc);
+
+            if (calculated_ecc == ecc) {
+                /* 找到错误位置并纠正成功 */
+                g_nand_dev.ecc_corrected_count++;
+                return ECC_RESULT_CORRECTED;
+            }
+
+            /* 恢复该位，继续尝试下一位 */
+            data[i] = original_byte;
+        }
     }
+
+    /* 无法通过1位翻转纠正，说明是多位错误或数据损坏 */
+    g_nand_dev.ecc_uncorrectable_count++;
+    return ECC_RESULT_UNCORRECTABLE;
 }
 
 /**

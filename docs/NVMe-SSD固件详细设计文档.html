@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>NVMe SSD固件详细设计文档</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+body { font-family: "Microsoft YaHei", "SimSun", serif; line-height: 1.8; max-width: 1000px; margin: 0 auto; padding: 40px; color: #333; }
+h1 { color: #1a5276; border-bottom: 3px solid #2980b9; padding-bottom: 10px; }
+h2 { color: #2471a3; border-left: 5px solid #2980b9; padding-left: 15px; margin-top: 40px; }
+h3 { color: #2e86c1; margin-top: 25px; }
+table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+th, td { border: 1px solid #bdc3c7; padding: 8px 12px; text-align: left; }
+th { background-color: #2980b9; color: white; }
+tr:nth-child(even) { background-color: #f2f3f4; }
+code { background-color: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: Consolas, monospace; }
+pre { background-color: #f4f4f4; padding: 15px; border-radius: 5px; overflow-x: auto; }
+.mermaid { background-color: #fafafa; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center; }
+.toc { background-color: #eaf2f8; padding: 20px; border-radius: 8px; }
+.toc a { color: #2980b9; text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>NVMe SSD固件详细设计文档</h1>
+<p><strong>项目名称：</strong>NVMe SSD固件开发：FTL算法栈与NVMe/TCP协议栈实现</p>
+<p><strong>文档版本：</strong>v1.0</p>
+<p><strong>最后更新：</strong>2026-08-23</p>
+
+<div class="toc">
+<h2>目录</h2>
+<ol>
+<li><a href="#ch1">项目概述</a></li>
+<li><a href="#ch2">系统架构设计</a></li>
+<li><a href="#ch3">模块详细设计</a></li>
+<li><a href="#ch4">关键业务流程图</a></li>
+<li><a href="#ch5">可靠性设计</a></li>
+<li><a href="#ch6">性能优化与测试</a></li>
+<li><a href="#appendix">附录</a></li>
+</ol>
+</div>
+
+<h2 id="ch1">1. 项目概述</h2>
+
+<h3>1.1 项目定位</h3>
+<p>本项目是一套完整的NVMe SSD固件参考实现，涵盖从底层NAND闪存抽象、FTL闪存转换层核心算法、NVMe控制器，到前端NVMe/TCP目标端协议栈的完整技术栈。项目实现与Linux内核nvme-tcp驱动的真实对接，支持nvme-cli、fio、dd等标准存储工具的功能验证与性能测试。</p>
+
+<h3>1.2 设计目标</h3>
+<table>
+<tr><th>目标</th><th>说明</th></tr>
+<tr><td>模块化架构</td><td>7层分层设计，模块间低耦合高内聚，接口清晰</td></tr>
+<tr><td>协议真实对接</td><td>NVMe/TCP协议栈与Linux内核驱动完整对接，非模拟协议</td></tr>
+<tr><td>企业级可靠性</td><td>掉电保护、ECC纠错、读干扰处理、数据保留、坏块管理</td></tr>
+<tr><td>算法完整性</td><td>6种GC算法对比、动态/静态磨损均衡、三种映射模式</td></tr>
+<tr><td>可扩展性</td><td>支持UFS协议栈扩展、OS抽象层支持RTOS移植</td></tr>
+</table>
+
+<h2 id="ch2">2. 系统架构设计</h2>
+
+<h3>2.1 7层模块化架构</h3>
+<div class="mermaid">
+graph TB
+    subgraph app["应用层"]
+        A["Linux nvme-tcp驱动 / nvme-cli / fio"]
+    end
+    subgraph l7["第7层-管理层"]
+        B["Manager<br/>健康监控/错误处理/自动恢复/看门狗"]
+    end
+    subgraph l6["第6层-OS抽象层"]
+        C["OSAL<br/>互斥锁/时间/线程<br/>Linux/FreeRTOS/RT-Thread"]
+    end
+    subgraph l5["第5层-协议层"]
+        D1["NVMe/TCP目标端<br/>IC握手/Connect/PDU解析"]
+        D2["UFS目标端<br/>SCSI命令集/UPIU事务"]
+    end
+    subgraph l4["第4层-NVMe控制器层"]
+        E["NVMe Controller<br/>Admin和I/O命令处理/队列管理"]
+    end
+    subgraph l3["第3层-FTL闪存转换层"]
+        F["FTL<br/>映射/GC/磨损均衡/坏块/PLP/ECC/TRIM"]
+    end
+    subgraph l2["第2层-NAND闪存抽象层"]
+        G["NAND<br/>页读写/块擦除/坏块/OOB/磨损/读干扰"]
+    end
+    subgraph l1["第1层-硬件抽象层"]
+        H["HAL<br/>文件模拟NAND介质"]
+    end
+    A --> D1
+    D1 --> E
+    D2 --> E
+    E --> F
+    F --> G
+    G --> H
+    B -.->|"监控"| F
+    B -.->|"监控"| G
+    C -.->|"提供接口"| B
+    C -.->|"提供接口"| D1
+</div>
+
+<h3>2.2 模块间调用关系</h3>
+<div class="mermaid">
+graph LR
+    subgraph host["主机侧"]
+        H["主机I/O请求"]
+    end
+    subgraph fw["固件侧"]
+        TCP["NVMe/TCP目标端"]
+        CTRL["NVMe控制器"]
+        FTL["FTL层"]
+        NAND["NAND层"]
+        HAL["硬件抽象"]
+        WAL["WAL日志"]
+        MGR["管理层"]
+    end
+    H -->|"TCP Socket"| TCP
+    TCP -->|"PDU解析"| CTRL
+    CTRL -->|"Admin和I/O命令"| FTL
+    FTL -->|"页读写"| NAND
+    NAND -->|"文件I/O"| HAL
+    FTL -->|"映射变更"| WAL
+    MGR -.->|"健康监控"| FTL
+    MGR -.->|"健康监控"| NAND
+</div>
+
+<h2 id="ch3">3. 模块详细设计</h2>
+
+<h3>3.1 NAND闪存抽象层</h3>
+<table>
+<tr><th>参数</th><th>值</th><th>说明</th></tr>
+<tr><td>页大小</td><td>4096字节</td><td>NAND物理页大小</td></tr>
+<tr><td>块大小</td><td>256页/块</td><td>1024KB/块</td></tr>
+<tr><td>总块数</td><td>128块</td><td>128MB原始容量</td></tr>
+<tr><td>颗粒类型</td><td>TLC</td><td>3位/单元，擦写寿命1000次</td></tr>
+<tr><td>OOB大小</td><td>16字节</td><td>magic/crc32/ecc/bad_block_mark</td></tr>
+</table>
+
+<h4>物理页布局</h4>
+<div class="mermaid">
+graph LR
+    subgraph page["物理页4112字节"]
+        D["数据区 4096字节"]
+        O["OOB区 16字节"]
+    end
+    subgraph oob["OOB布局"]
+        M["magic 4B"]
+        C["crc32 4B"]
+        E["ecc 4B"]
+        B["mark 1B"]
+        R["reserved 3B"]
+    end
+    D --> O
+    O --> M
+    M --> C
+    C --> E
+    E --> B
+    B --> R
+</div>
+
+<h3>3.2 FTL闪存转换层</h3>
+<table>
+<tr><th>参数</th><th>值</th><th>说明</th></tr>
+<tr><td>总逻辑页数</td><td>22937</td><td>128乘256乘70% 预留30% OP</td></tr>
+<tr><td>映射模式</td><td>页/块/混合</td><td>可配置</td></tr>
+<tr><td>GC算法</td><td>6种</td><td>Greedy/Cost-Benefit/CAT/Windowed/d-Choices/FRA</td></tr>
+<tr><td>OP比例</td><td>30%</td><td>过度配置空间</td></tr>
+</table>
+
+<h4>L2P映射机制</h4>
+<div class="mermaid">
+graph LR
+    L["逻辑页号 LPN"] -->|"数组索引 O(1)"| T["L2P映射表<br/>l2p_table[LPN]"]
+    T --> P["物理页号 PPN"]
+    P --> N["NAND物理页读取"]
+</div>
+
+<h2 id="ch4">4. 关键业务流程图</h2>
+
+<h3>4.1 固件启动流程</h3>
+<div class="mermaid">
+flowchart TD
+    A["main函数入口"] --> B["解析命令行参数"]
+    B --> C["初始化日志模块"]
+    C --> D["初始化消息队列"]
+    D --> E["初始化NAND层 nand_init"]
+    E --> F{"介质文件是否存在?"}
+    F -->|"是 恢复模式"| G["用r+b打开保留数据<br/>不随机生成坏块<br/>扫描OOB重建页状态"]
+    F -->|"否 全新介质"| H["用w+b创建文件<br/>随机生成初始坏块"]
+    G --> I["初始化FTL层 ftl_init"]
+    H --> I
+    I --> J["分配L2P表内存 初始化为INVALID"]
+    J --> K{"快照文件是否存在?"}
+    K -->|"是"| L["ftl_load_snapshot<br/>校验magic和checksum<br/>恢复L2P映射和统计信息<br/>重建反向映射表"]
+    K -->|"否"| M["全新初始化 无恢复"]
+    L --> N["初始化NVMe控制器"]
+    M --> N
+    N --> O["初始化NVMe/TCP目标端<br/>创建TCP监听socket 4420"]
+    O --> P["初始化管理层"]
+    P --> Q["注册所有模块"]
+    Q --> R["启动所有模块"]
+    R --> S["进入主循环"]
+    S --> T["处理TCP连接和NVMe命令"]
+    T --> U{"每5000循环?"}
+    U -->|"是"| V["保存PLP快照 ftl_save_snapshot"]
+    U -->|"否"| W["管理层健康检查 看门狗喂狗"]
+    V --> W
+    W --> T
+</div>
+
+<h3>4.2 主机写入流程 NVMe Write</h3>
+<div class="mermaid">
+flowchart TD
+    A["主机 nvme write"] --> B["Linux nvme-tcp驱动封装CapsuleCmd"]
+    B --> C["TCP发送到设备端口4420"]
+    C --> D["nvme_tcp_target接收PDU"]
+    D --> E["解析CapsuleCmd 提取Opcode/SLBA/NLB"]
+    E --> F["接收H2CData数据"]
+    F --> G["nvme_ctrl_process_io_cmd分发"]
+    G --> H{"遍历每个LBA"}
+    H --> I["ftl_write LPN 数据"]
+    I --> J{"LPN是否已映射?"}
+    J -->|"是"| K["标记旧PPN无效 valid_page_cnt--"]
+    J -->|"否"| L["直接分配新页"]
+    K --> M["ftl_alloc_phy_page分配新PPN"]
+    L --> M
+    M --> N{"当前块有空闲页?"}
+    N -->|"是"| O["分配当前页 cur_write_page++"]
+    N -->|"否"| P{"空闲块低于阈值?"}
+    P -->|"否"| Q["选择擦写次数最少的空闲块"]
+    P -->|"是"| R["触发GC ftl_trigger_gc<br/>选择victim块 搬迁有效页 擦除旧块"]
+    R --> Q
+    Q --> S["nand_page_write PPN 数据"]
+    O --> S
+    S --> T["写入数据区4096字节"]
+    T --> U["计算ECC校验值"]
+    U --> V["写入OOB magic/crc32/ecc"]
+    V --> W["更新页有效标记 page_valid=1"]
+    W --> X["更新L2P映射 l2p_table[LPN]=PPN"]
+    X --> Y["更新统计 host_write_pages++"]
+    Y --> Z{"还有LBA?"}
+    Z -->|"是"| H
+    Z -->|"否"| AA["构造CapsuleResp含CQE status=Good"]
+    AA --> AB["TCP发送回主机"]
+    AB --> AC["主机收到完成响应"]
+</div>
+
+<h3>4.3 主机读取流程 NVMe Read</h3>
+<div class="mermaid">
+flowchart TD
+    A["主机 nvme read"] --> B["Linux nvme-tcp驱动封装CapsuleCmd"]
+    B --> C["nvme_tcp_target接收 解析CapsuleCmd"]
+    C --> D["提取Opcode=Read SLBA NLB"]
+    D --> E["nvme_ctrl分发到Read处理"]
+    E --> F{"遍历每个LBA"}
+    F --> G["ftl_read LPN 缓冲区"]
+    G --> H{"l2p_table[LPN]==INVALID?"}
+    H -->|"是"| I["返回RET_ERR_NOT_MAPPED"]
+    H -->|"否"| J["获取PPN=l2p_table[LPN]"]
+    J --> K["nand_page_read PPN 缓冲区"]
+    K --> L{"page_valid[page]==1?"}
+    L -->|"否"| M["返回NOT_MAPPED"]
+    L -->|"是"| N["读取数据区4096字节"]
+    N --> O["读取OOB获取ECC校验值"]
+    O --> P["重新计算当前数据ECC"]
+    P --> Q{"计算ECC==存储ECC?"}
+    Q -->|"是"| R["无错误 直接返回数据"]
+    Q -->|"否"| S["逐位翻转尝试定位错误"]
+    S --> T{"1位翻转后ECC匹配?"}
+    T -->|"是"| U["纠正1位错误 ecc_corrected_count++"]
+    T -->|"否"| V["多位错误 无法纠正<br/>ecc_uncorrectable_count++ 返回错误"]
+    U --> W["read_count++ 读干扰检测"]
+    R --> W
+    W --> X{"read_count大于阈值100000?"}
+    X -->|"是"| Y["标记need_reclaim=1 触发后台回收"]
+    X -->|"否"| Z["返回读取数据"]
+    Y --> Z
+    Z --> AA{"还有LBA?"}
+    AA -->|"是"| F
+    AA -->|"否"| AB["构造C2HData PDU含读取数据"]
+    AB --> AC["构造CapsuleResp含CQE"]
+    AC --> AD["TCP发送 先C2HData后CapsuleResp"]
+    AD --> AE["主机收到数据和完成响应"]
+</div>
+
+<h3>4.4 GC垃圾回收流程</h3>
+<div class="mermaid">
+flowchart TD
+    A["ftl_alloc_phy_page分配新页"] --> B{"当前写入块有空闲页?"}
+    B -->|"是"| C["直接分配"]
+    B -->|"否"| D["选择新空闲块"]
+    D --> E{"空闲块数量低于阈值?"}
+    E -->|"否"| F["选择擦写次数最少的空闲块"]
+    E -->|"是"| G["触发GC ftl_trigger_gc"]
+    G --> H["根据GC算法选择victim块"]
+    H --> I{"遍历victim块所有页"}
+    I --> J{"页是否有效? page_valid==1"}
+    J -->|"是"| K["读取有效页数据 nand_page_read"]
+    K --> L["分配新空闲块页 ftl_alloc_phy_page"]
+    L --> M["写入数据到新页 nand_page_write"]
+    M --> N["更新L2P映射 l2p_table[LPN]=新PPN"]
+    N --> O["搬迁页数++ nand_write_pages++"]
+    J -->|"否"| P["跳过无效页"]
+    O --> Q{"还有页?"}
+    P --> Q
+    Q -->|"是"| I
+    Q -->|"否"| R["擦除victim块 nand_block_erase"]
+    R --> S["重置页有效标记 erase_count++ 磨损均衡"]
+    S --> T{"高磨损且概率触发?"}
+    T -->|"是"| U["标记为坏块 从预留块替换"]
+    T -->|"否"| V["块变为空闲状态"]
+    U --> V
+    V --> W["gc_count++"]
+    W --> X["GC完成 返回新空闲块"]
+</div>
+
+<h3>4.5 掉电恢复流程</h3>
+<div class="mermaid">
+flowchart TD
+    A["固件启动 模拟上电"] --> B["nand_init"]
+    B --> C{"介质文件存在?"}
+    C -->|"是 恢复模式"| D["用r+b打开文件 保留数据"]
+    C -->|"否"| E["全新创建"]
+    D --> F["不随机生成坏块 出厂固定"]
+    F --> G["扫描所有页OOB区域"]
+    G --> H{"OOB.magic==0x4F4F4231?"}
+    H -->|"是"| I["标记page_valid=1 块状态=USED"]
+    H -->|"否"| J["页无效 跳过"]
+    I --> K{"还有页?"}
+    J --> K
+    K -->|"是"| G
+    K -->|"否"| L["ftl_init 分配L2P表 初始化为INVALID"]
+    L --> M{"快照文件存在?"}
+    M -->|"是"| N["ftl_load_snapshot"]
+    N --> O["读取元数据头"]
+    O --> P{"magic==FTL1 且 checksum正确?"}
+    P -->|"是"| Q["读取L2P映射表数据"]
+    Q --> R["恢复统计信息 host_write_pages等"]
+    R --> S["重建反向映射表 reverse_map"]
+    S --> T["PLP恢复完成 可读取掉电前数据"]
+    P -->|"否"| U["快照损坏 记录错误 全新初始化"]
+    M -->|"否"| V["无快照 全新初始化"]
+    E --> W["全新介质 随机坏块"]
+    W --> L
+    U --> X["固件正常运行"]
+    V --> X
+    T --> X
+</div>
+
+<h3>4.6 NVMe/TCP连接建立时序图</h3>
+<div class="mermaid">
+sequenceDiagram
+    participant H as 主机
+    participant D as 设备固件
+    H->>D: TCP连接 SYN
+    D-->>H: TCP连接 ACK
+    H->>D: ICReq 初始化握手
+    D->>D: 解析ICReq 验证PDU格式 分配连接资源
+    D-->>H: ICResp 握手响应
+    H->>D: Connect Fabric命令 QID=0
+    D->>D: 解析Connect 提取SUBNQN和QID<br/>QID=0创建Admin队列
+    D-->>H: Connect响应
+    H->>D: Admin命令 Identify
+    D->>D: 处理Identify 返回Controller和Namespace信息
+    D-->>H: Admin响应加数据
+    H->>D: Create I/O CQ QID=1
+    D->>D: 创建I/O完成队列
+    D-->>H: 响应
+    H->>D: Create I/O SQ QID=1
+    D->>D: 创建I/O提交队列
+    D-->>H: 响应
+    H->>D: I/O Read和Write命令
+    D->>D: 处理I/O命令 调用FTL和NAND
+    D-->>H: 数据加完成响应
+</div>
+
+<h3>4.7 ECC纠错流程</h3>
+<div class="mermaid">
+flowchart TD
+    A["nand_page_write写入"] --> B["对4096字节数据逐字节计算汉明码"]
+    B --> C["异或汇总为32位ECC值"]
+    C --> D["写入OOB.ecc字段"]
+    D --> E["写入完成"]
+    F["nand_page_read读取"] --> G["读取数据区4096字节"]
+    G --> H["读取OOB获取存储的ECC值"]
+    H --> I["重新计算当前数据ECC"]
+    I --> J{"计算ECC == 存储ECC?"}
+    J -->|"是"| K["无错误 返回数据"]
+    J -->|"否"| L["遍历每个字节的每一位"]
+    L --> M["翻转1位 重新计算ECC"]
+    M --> N{"翻转后ECC匹配?"}
+    N -->|"是"| O["找到错误位置 纠正1位错误"]
+    O --> P["ecc_corrected_count++ 返回纠正后数据"]
+    N -->|"否"| Q["恢复该位 尝试下一位"]
+    Q --> R{"所有位都尝试过?"}
+    R -->|"否"| L
+    R -->|"是"| S["多位错误 无法纠正"]
+    S --> T["ecc_uncorrectable_count++ 返回错误"]
+</div>
+
+<h2 id="ch5">5. 可靠性设计</h2>
+
+<h3>5.1 可靠性特性矩阵</h3>
+<table>
+<tr><th>特性</th><th>实现机制</th><th>验证方式</th></tr>
+<tr><td>掉电保护PLP</td><td>元数据快照持久化加上电自动恢复</td><td>25项PLP测试 模拟随机掉电</td></tr>
+<tr><td>ECC纠错</td><td>(7,4)汉明码编解码 1位错误自动纠正</td><td>数据保留错误注入加读取验证</td></tr>
+<tr><td>读干扰处理</td><td>块读取次数阈值检测加need_reclaim标记</td><td>高频读取测试加后台回收验证</td></tr>
+<tr><td>数据保留模拟</td><td>高温和长时间存储位错误注入</td><td>可配置错误率加ECC纠错验证</td></tr>
+<tr><td>坏块管理</td><td>初始坏块加磨损坏块加自动替换</td><td>坏块注入加写入和读取验证</td></tr>
+<tr><td>磨损均衡</td><td>动态加静态磨损均衡</td><td>擦写次数分布统计</td></tr>
+<tr><td>WAL日志</td><td>写入前记录映射变更</td><td>日志重放恢复框架级</td></tr>
+</table>
+
+<h3>5.2 PLP快照文件结构</h3>
+<div class="mermaid">
+graph LR
+    subgraph snap["ftl_snapshot.bin"]
+        H["元数据头 32字节<br/>magic=FTL1<br/>version<br/>checksum<br/>host_write_pages<br/>nand_write_pages<br/>gc_count<br/>cur_write_block<br/>cur_write_page"]
+        L["L2P映射表 约90KB<br/>l2p_table[0]=PPN<br/>l2p_table[1]=PPN<br/>...<br/>l2p_table[22936]=PPN"]
+    end
+    H --> L
+</div>
+
+<h2 id="ch6">6. 性能优化与测试</h2>
+
+<h3>6.1 已实施的性能优化</h3>
+<table>
+<tr><th>优化项</th><th>优化前</th><th>优化后</th><th>提升</th></tr>
+<tr><td>NAND写入fflush</td><td>每次写入都fflush强制刷盘</td><td>去掉fflush nand_deinit时统一flush</td><td>写入性能3-5倍</td></tr>
+<tr><td>日志级别</td><td>默认INFO I/O路径频繁输出</td><td>默认WARN --debug和--trace控制</td><td>I/O路径开销降低</td></tr>
+<tr><td>L2P映射查找</td><td>-</td><td>数组直接索引 O(1)</td><td>映射查找无开销</td></tr>
+</table>
+
+<h3>6.2 测试体系</h3>
+<table>
+<tr><th>测试类型</th><th>测试程序</th><th>用例数</th><th>覆盖范围</th></tr>
+<tr><td>FTL单元测试</td><td>test_ftl_unit</td><td>25项</td><td>初始化/单页读写/多页读写/覆盖写/TRIM/GC</td></tr>
+<tr><td>PLP掉电恢复测试</td><td>test_plp_recovery</td><td>25项</td><td>快照保存/加载/覆盖写恢复/TRIM恢复</td></tr>
+<tr><td>GC算法基准测试</td><td>test_gc_benchmark</td><td>6种算法</td><td>Greedy/Cost-Benefit/CAT/Windowed/d-Choices/FRA</td></tr>
+<tr><td>协议兼容性测试</td><td>nvme-cli手动</td><td>11项</td><td>connect/list/read/write/write-zeroes/dsm</td></tr>
+<tr><td>性能测试</td><td>fio</td><td>4项</td><td>顺序读/顺序写/随机读/随机写</td></tr>
+<tr><td>数据一致性测试</td><td>dd加md5sum</td><td>多组</td><td>单LBA/多LBA 64KB读写一致性</td></tr>
+</table>
+
+<h2 id="appendix">附录</h2>
+
+<h3>附录A：错误码定义</h3>
+<table>
+<tr><th>错误码</th><th>值</th><th>含义</th></tr>
+<tr><td>RET_OK</td><td>0</td><td>成功</td></tr>
+<tr><td>RET_ERR_PARAM</td><td>-1</td><td>入参非法</td></tr>
+<tr><td>RET_ERR_NO_SPACE</td><td>-2</td><td>存储空间不足</td></tr>
+<tr><td>RET_ERR_BAD_BLOCK</td><td>-3</td><td>操作坏块</td></tr>
+<tr><td>RET_ERR_OVERWRITE</td><td>-4</td><td>覆写已写入页</td></tr>
+<tr><td>RET_ERR_NOT_MAPPED</td><td>-5</td><td>逻辑页未映射</td></tr>
+<tr><td>RET_ERR_NOT_INIT</td><td>-6</td><td>设备未初始化</td></tr>
+<tr><td>RET_ERR_INTERNAL</td><td>-7</td><td>内部错误</td></tr>
+<tr><td>RET_ERR_CHECKSUM</td><td>-8</td><td>校验和错误</td></tr>
+</table>
+
+<h3>附录B：关键常量</h3>
+<table>
+<tr><th>常量</th><th>值</th><th>说明</th></tr>
+<tr><td>NAND_PAGE_SIZE</td><td>4096</td><td>页大小字节</td></tr>
+<tr><td>NAND_PAGES_PER_BLOCK</td><td>256</td><td>每页块数</td></tr>
+<tr><td>NAND_TOTAL_BLOCKS</td><td>128</td><td>总块数</td></tr>
+<tr><td>FTL_TOTAL_LPNS</td><td>22937</td><td>总逻辑页数</td></tr>
+<tr><td>NAND_OOB_SIZE</td><td>16</td><td>OOB大小字节</td></tr>
+<tr><td>NAND_OOB_MAGIC</td><td>0x4F4F4231</td><td>OOB魔数 OOB1</td></tr>
+<tr><td>FTL_META_MAGIC</td><td>0x46544C31</td><td>FTL快照魔数 FTL1</td></tr>
+<tr><td>FTL_INVALID_PPN</td><td>0xFFFFFFFF</td><td>无效物理页标记</td></tr>
+<tr><td>NAND_READ_DISTURB_THRESHOLD</td><td>100000</td><td>读干扰阈值</td></tr>
+</table>
+
+<hr>
+<p style="text-align:center; color:#888;">文档版本 v1.0 | 最后更新 2026-08-23</p>
+
+<script>
+mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose', flowchart:{useMaxWidth:true, htmlLabels:true, curve:'basis'}});
+</script>
+</body>
+</html>

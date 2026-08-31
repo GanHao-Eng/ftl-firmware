@@ -1,9 +1,10 @@
-/**
+﻿/**
  * @file main.c
  * @brief FTL 固件主程序入口
  * @details 企业级 FTL 固件的主程序入口，初始化所有模块并运行主循环
  */
 
+#define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -303,7 +304,7 @@ static void deinit_all_modules(void)
  * @brief 运行基础测试
  * @return 0 成功，-1 失败
  */
-static int run_basic_test(void)
+static int __attribute__((unused)) run_basic_test(void)
 {
     uint8_t write_buf[NAND_PAGE_SIZE];
     uint8_t read_buf[NAND_PAGE_SIZE];
@@ -517,7 +518,7 @@ static void *nand_test_thread_func(void *arg)
  * @brief 运行多线程测试
  * @return 0 成功，-1 失败
  */
-static int run_thread_test(void)
+static int __attribute__((unused)) run_thread_test(void)
 {
     uint32_t thread1 = 0;
     uint32_t thread2 = 0;
@@ -644,7 +645,7 @@ static void dma_test_callback(uint32_t channel, bool success,
  * @brief 运行 DMA 测试
  * @return 0 成功，-1 失败
  */
-static int run_dma_test(void)
+static int __attribute__((unused)) run_dma_test(void)
 {
     uint8_t *src_buf = NULL;
     uint8_t *dst_buf = NULL;
@@ -781,7 +782,7 @@ static int run_dma_test(void)
  * @brief 运行 RAID 功能测试
  * @return 0 成功，-1 失败
  */
-static int run_raid_test(void)
+static int __attribute__((unused)) run_raid_test(void)
 {
     int pass = 1;
     raid_config_t config;
@@ -947,7 +948,7 @@ static int run_raid_test(void)
  * @brief 运行企业级特性测试
  * @return 0 成功，-1 失败
  */
-static int test_enterprise_features(void)
+static int __attribute__((unused)) test_enterprise_features(void)
 {
     int pass = 1;
     ret_code_t ret;

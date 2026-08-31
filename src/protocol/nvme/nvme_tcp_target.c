@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nvme_tcp_target.c
  * @brief NVMe/TCP 目标端实现（NVMe/TCP 2.0 协议格式）
  * @details NVMe over Fabrics (NVMe/TCP) 目标端完整实现。
@@ -400,6 +400,71 @@ ret_code_t nvme_tcp_send_r2t(nvme_tcp_conn_t *conn,
  * @note Connect 命令的 QID 在 inline data 的 byte 16-17，
  *       Admin 队列=0xFFFF(映射为0)，I/O 队列=1+
  */
+
+/**
+ * @brief 分块发送 C2HData (Controller to Host Data)
+ *
+ * 将数据缓冲区按 maxh2cdata 分块发送，最后一块设置 last 标志。
+ * 用于 Identify、Get Log Page、Read 等需要返回数据的命令。
+ *
+ * @param conn       连接上下文
+ * @param cid        命令ID
+ * @param data       数据缓冲区
+ * @param data_len   数据总长度
+ * @return RET_OK 成功
+ */
+static ret_code_t nvme_tcp_send_c2hdata_chunks(nvme_tcp_conn_t *conn, uint16_t cid,
+                                                  const uint8_t *data, uint32_t data_len)
+{
+    uint32_t chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
+    uint32_t offset = 0;
+
+    while (offset < data_len) {
+        uint32_t this_chunk = (data_len - offset < chunk_size) ?
+                              (data_len - offset) : chunk_size;
+        bool last = (offset + this_chunk >= data_len);
+        nvme_tcp_send_c2hdata(conn, cid, data + offset, this_chunk, offset, last);
+        offset += this_chunk;
+    }
+    return RET_OK;
+}
+
+/**
+ * @brief 发送 CapsuleResp 完成响应
+ *
+ * 初始化完成队列条目，设置 cid/sqid/status，发送 CapsuleResp PDU。
+ *
+ * @param conn   连接上下文
+ * @param cid    命令ID
+ * @param sqid   队列ID
+ * @param status 状态码（NVMe 规范定义，0=成功）
+ */
+static void nvme_tcp_send_completion(nvme_tcp_conn_t *conn, uint16_t cid,
+                                       uint16_t sqid, uint16_t status)
+{
+    nvme_completion_t cpl;
+    memset(&cpl, 0, sizeof(cpl));
+    cpl.cid = cpu_to_le16(cid);
+    cpl.sqid = cpu_to_le16(sqid);
+    cpl.status = cpu_to_le16(status);
+    nvme_tcp_send_capsule_resp(conn, &cpl);
+}
+
+/**
+ * @brief 从 NVMe 命令解析 SLBA 和 NLB
+ *
+ * SLBA = (cdw11 << 32) | cdw10（64位起始逻辑块地址）
+ * NLB  = (cdw12 & 0xFFFF) + 1（逻辑块数量，0-based）
+ *
+ * @param cmd   NVMe 命令
+ * @param slba  输出：起始逻辑块地址
+ * @param nlb   输出：逻辑块数量
+ */
+static void nvme_tcp_parse_slba_nlb(const nvme_command_t *cmd, uint64_t *slba, uint16_t *nlb)
+{
+    *nlb = (le16_to_cpu(cmd->cdw12) & 0xFFFF) + 1;
+    *slba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) | le32_to_cpu(cmd->cdw10);
+}
 ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
                                        const nvme_tcp_capsule_cmd_hdr_t *pdu,
                                        const uint8_t *data,
@@ -408,37 +473,29 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
     nvme_completion_t cpl;
     nvme_command_t cmd_copy;
     uint16_t cid = 0;
-    uint16_t sqid = conn->qid;  /* 从连接上下文获取队列ID (0=Admin, 1+=I/O) */
+    uint16_t sqid = conn->qid;
+    uint64_t slba = 0;
+    uint16_t nlb = 0;
     uint32_t transfer_len = 0;
 
-    /* 从 packed 结构体拷贝命令到本地对齐变量，避免非对齐访问 */
     memcpy(&cmd_copy, &pdu->ccsqe, sizeof(nvme_command_t));
     const nvme_command_t *cmd = &cmd_copy;
     cid = le16_to_cpu(cmd->cid);
 
-    LOG_INFO("NVMe/TCP: 收到 CapsuleCmd, opcode=0x%02X, cid=%u, sqid=%u, data_len=%u",
+    LOG_INFO("NVMe/TCP: CapsuleCmd opcode=0x%02X cid=%u sqid=%u data_len=%u",
              cmd->opcode, cid, sqid, data_len);
 
-    /* 判断是否需要主机发送数据（写命令或带数据的Admin命令） */
+    /* 1. Write: 分配缓冲区，发送 R2T */
     if (cmd->opcode == NVME_IO_WRITE) {
-        /* 写命令：计算数据长度，发送 R2T 请求数据 */
-        uint16_t nlb = (le16_to_cpu(cmd->cdw12) & 0xFFFF) + 1;
-        uint64_t slba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) |
-                        le32_to_cpu(cmd->cdw10);
-        transfer_len = nlb * 4096;  /* 假设 LBA 大小 4KB */
-
-        LOG_INFO("NVMe/TCP: 写命令, SLBA=%llu, NLB=%u, 数据长度=%u",
+        nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
+        transfer_len = nlb * 4096;
+        LOG_INFO("NVMe/TCP: Write SLBA=%llu NLB=%u len=%u",
                  (unsigned long long)slba, nlb, transfer_len);
 
-        /* 分配数据缓冲区 */
         if (conn->data_buffer) free(conn->data_buffer);
         conn->data_buffer = (uint8_t *)malloc(transfer_len);
         if (conn->data_buffer == NULL) {
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(0x0006);  /* 内部错误 */
-            nvme_tcp_send_capsule_resp(conn, &cpl);
+            nvme_tcp_send_completion(conn, cid, sqid, 0x0006);
             return RET_ERR_NO_SPACE;
         }
         conn->data_len = 0;
@@ -448,60 +505,43 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
         conn->pending_slba = slba;
         conn->pending_opcode = NVME_IO_WRITE;
 
-        /* 如果 CapsuleCmd 中已有 inline data，先拷贝 */
         if (data && data_len > 0) {
             uint32_t copy_len = (data_len < transfer_len) ? data_len : transfer_len;
             memcpy(conn->data_buffer, data, copy_len);
             conn->data_len = copy_len;
         }
 
-        /* 如果还有数据需要接收，发送 R2T */
         if (conn->data_len < transfer_len) {
             nvme_tcp_send_r2t(conn, cid, 0, conn->data_len,
                               transfer_len - conn->data_len);
         } else {
-            /* inline data 已包含全部数据，写入 FTL 后发送完成响应 */
-            uint32_t page_count = transfer_len / 4096;
             uint32_t i = 0;
             uint16_t ws = 0x0000;
-            LOG_INFO("NVMe/TCP: 写数据(inline)接收完成, SLBA=%llu, pages=%u",
-                     (unsigned long long)conn->pending_slba, page_count);
-            for (i = 0; i < page_count; i++) {
+            for (i = 0; i < nlb; i++) {
                 if (ftl_write((uint32_t)(conn->pending_slba + i),
                               conn->data_buffer + i * 4096) != RET_OK) {
-                    ws = 0x0006;
-                    break;
+                    ws = 0x0006; break;
                 }
             }
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(ws);
-            nvme_tcp_send_capsule_resp(conn, &cpl);
+            nvme_tcp_send_completion(conn, cid, sqid, ws);
             free(conn->data_buffer);
             conn->data_buffer = NULL;
             conn->data_len = 0;
             conn->data_total = 0;
         }
-
         return RET_OK;
     }
 
-    /* Dataset Management (TRIM) 命令：带 range 列表数据 */
+    /* 2. Dataset Management (TRIM) */
     if (cmd->opcode == NVME_IO_DATASET_MGMT && sqid != 0) {
         uint8_t nr = (le32_to_cpu(cmd->cdw10) & 0xFF) + 1;
-        transfer_len = nr * 16;  /* 每个 range 16 字节 */
-
-        LOG_INFO("NVMe/TCP: Dataset Management, NR=%u, 数据长度=%u", nr, transfer_len);
+        transfer_len = nr * 16;
+        LOG_INFO("NVMe/TCP: Dataset Mgmt NR=%u len=%u", nr, transfer_len);
 
         if (conn->data_buffer) free(conn->data_buffer);
         conn->data_buffer = (uint8_t *)calloc(1, transfer_len);
         if (conn->data_buffer == NULL) {
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(0x0006);
-            nvme_tcp_send_capsule_resp(conn, &cpl);
+            nvme_tcp_send_completion(conn, cid, sqid, 0x0006);
             return RET_ERR_NO_SPACE;
         }
         conn->data_len = 0;
@@ -510,7 +550,6 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
         conn->pending_sqid = sqid;
         conn->pending_opcode = NVME_IO_DATASET_MGMT;
 
-        /* 拷贝 inline data */
         if (data_len > 0 && data != NULL) {
             uint32_t copy_len = data_len < transfer_len ? data_len : transfer_len;
             memcpy(conn->data_buffer, data, copy_len);
@@ -521,25 +560,17 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
             nvme_tcp_send_r2t(conn, cid, 0, conn->data_len,
                               conn->data_total - conn->data_len);
         } else {
-            /* inline data 已包含全部 range 数据，直接处理 */
             uint32_t r = 0;
             uint16_t ds = 0x0000;
-            LOG_INFO("NVMe/TCP: TRIM 数据(inline)接收完成, ranges=%u", nr);
             for (r = 0; r < nr; r++) {
                 uint8_t *range = conn->data_buffer + r * 16;
                 uint32_t length = le32_to_cpu(*(uint32_t *)(range + 4)) + 1;
-                uint64_t slba = le64_to_cpu(*(uint64_t *)(range + 8));
-                if (ftl_trim((uint32_t)slba, length) != RET_OK) {
-                    LOG_ERROR("NVMe/TCP: FTL TRIM 失败, SLBA=%llu, len=%u",
-                              (unsigned long long)slba, length);
+                uint64_t range_slba = le64_to_cpu(*(uint64_t *)(range + 8));
+                if (ftl_trim((uint32_t)range_slba, length) != RET_OK) {
                     ds = 0x0006;
                 }
             }
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(ds);
-            nvme_tcp_send_capsule_resp(conn, &cpl);
+            nvme_tcp_send_completion(conn, cid, sqid, ds);
             free(conn->data_buffer);
             conn->data_buffer = NULL;
             conn->data_len = 0;
@@ -548,399 +579,162 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
         return RET_OK;
     }
 
-    /* Fabric Command (NVMe over Fabrics 特有, opcode=0x7F) */
+    /* 3. Fabric Command (opcode=0x7F) */
     if (cmd->opcode == 0x7F) {
-        /* FCTYPE 在命令字节4（nsid 字段的第一个字节） */
         uint8_t fctype = ((uint8_t *)cmd)[4];
         nvme_ctrl_regs_t *regs = nvme_ctrl_get_regs();
-
-        LOG_INFO("NVMe/TCP: Fabric Command, FCTYPE=0x%02X, cid=%u", fctype, cid);
-
         memset(&cpl, 0, sizeof(cpl));
         cpl.cid = cpu_to_le16(cid);
         cpl.sqid = cpu_to_le16(sqid);
 
         switch (fctype) {
-        case 0x01: {  /* Connect */
-            /* Connect 命令: QID 在 inline data byte 16-17 (Admin=0xFFFF, I/O=1+) */
+        case 0x01: {
             uint16_t connect_qid = 0;
             if (data != NULL && data_len >= 18) {
                 connect_qid = data[16] | ((uint16_t)data[17] << 8);
-                if (connect_qid == 0xFFFF) connect_qid = 0;  /* Admin 队列 */
+                if (connect_qid == 0xFFFF) connect_qid = 0;
             }
             conn->qid = connect_qid;
-            /* Connect 响应：DW0 = CNTLID（控制器ID） */
-            cpl.dw0 = cpu_to_le32(0x0001);  /* CNTLID=1 */
+            cpl.dw0 = cpu_to_le32(0x0001);
             cpl.status = cpu_to_le16(0x0000);
-            LOG_INFO("NVMe/TCP: Connect 命令成功, CNTLID=1, QID=%u", connect_qid);
             break;
         }
-
-        case 0x00: {  /* Property Set */
-            /* offset 在 cdw11，value 在 cdw12(低32)+cdw13(高32) */
+        case 0x00: {
             uint32_t offset = le32_to_cpu(cmd->cdw11);
             uint64_t value = ((uint64_t)le32_to_cpu(cmd->cdw13) << 32) |
                              le32_to_cpu(cmd->cdw12);
-
-            LOG_INFO("NVMe/TCP: Property Set, offset=0x%X, value=0x%llX",
-                     offset, (unsigned long long)value);
-
             if (regs != NULL) {
                 switch (offset) {
-                case 0x14:  /* CC (Controller Configuration) */
+                case 0x14:
                     regs->cc = (uint32_t)value;
-                    /* 如果 CC.EN=1，设置 CSTS.RDY=1 */
-                    if (regs->cc & 0x01) {
-                        regs->csts |= 0x01;  /* RDY=1 */
-                        LOG_INFO("NVMe/TCP: CC.EN=1, CSTS.RDY=1");
-                    } else {
-                        regs->csts &= ~0x01;  /* RDY=0 */
-                    }
+                    if (regs->cc & 0x01) regs->csts |= 0x01;
+                    else regs->csts &= ~0x01;
                     break;
-                case 0x24:  /* AQA */
-                    regs->aqa = (uint32_t)value;
-                    break;
-                case 0x28:  /* ASQ */
-                    regs->asq = value;
-                    break;
-                case 0x30:  /* ACQ */
-                    regs->acq = value;
-                    break;
-                default:
-                    LOG_WARN("NVMe/TCP: Property Set 未知偏移 0x%X", offset);
-                    break;
+                case 0x24: regs->aqa = (uint32_t)value; break;
+                case 0x28: regs->asq = value; break;
+                case 0x30: regs->acq = value; break;
                 }
             }
             cpl.status = cpu_to_le16(0x0000);
             break;
         }
-
-        case 0x04: {  /* Property Get */
-            /* offset 在 cdw11，返回值在 result(DW0+DW1) */
+        case 0x04: {
             uint32_t offset = le32_to_cpu(cmd->cdw11);
             uint64_t value = 0;
-
             if (regs != NULL) {
                 switch (offset) {
-                case 0x00:  /* CAP (Controller Capabilities, 8字节) */
-                    value = regs->cap;
-                    break;
-                case 0x08:  /* VS (Version, 4字节) */
-                    value = regs->vs;
-                    break;
-                case 0x14:  /* CC (Controller Configuration, 4字节) */
-                    value = regs->cc;
-                    break;
-                case 0x1C:  /* CSTS (Controller Status, 4字节) */
-                    value = regs->csts;
-                    break;
-                case 0x24:  /* AQA (Admin Queue Attributes, 4字节) */
-                    value = regs->aqa;
-                    break;
-                case 0x28:  /* ASQ (Admin SQ Base, 8字节) */
-                    value = regs->asq;
-                    break;
-                case 0x30:  /* ACQ (Admin CQ Base, 8字节) */
-                    value = regs->acq;
-                    break;
-                default:
-                    LOG_WARN("NVMe/TCP: Property Get 未知偏移 0x%X", offset);
-                    value = 0;
-                    break;
+                case 0x00: value = regs->cap; break;
+                case 0x08: value = regs->vs; break;
+                case 0x14: value = regs->cc; break;
+                case 0x1C: value = regs->csts; break;
+                case 0x24: value = regs->aqa; break;
+                case 0x28: value = regs->asq; break;
+                case 0x30: value = regs->acq; break;
                 }
             }
-
-            /* 返回64位值：DW0=低32位，DW1(rsvd1)=高32位 */
             cpl.dw0 = cpu_to_le32((uint32_t)(value & 0xFFFFFFFF));
             cpl.rsvd1 = cpu_to_le32((uint32_t)(value >> 32));
             cpl.status = cpu_to_le16(0x0000);
-
-            LOG_INFO("NVMe/TCP: Property Get, offset=0x%X, value=0x%llX",
-                     offset, (unsigned long long)value);
             break;
         }
-
         default:
-            LOG_WARN("NVMe/TCP: 未知 Fabric FCTYPE=0x%02X", fctype);
-            cpl.status = cpu_to_le16(0x0000);  /* 临时返回成功 */
+            cpl.status = cpu_to_le16(0x0000);
             break;
         }
-
         nvme_tcp_send_capsule_resp(conn, &cpl);
         return RET_OK;
     }
 
-    /* Identify Controller 命令需要通过 C2HData 返回 4096 字节数据 */
-    if (cmd->opcode == NVME_ADMIN_IDENTIFY && (le32_to_cpu(cmd->cdw10) & 0xFF) == 0x01) {
-        uint8_t id_data[4096];
-        uint32_t chunk_size = 0;
-        uint32_t offset = 0;
-
-        LOG_INFO("NVMe/TCP: Identify Controller, 准备发送 4096 字节数据");
-
-        nvme_ctrl_fill_identify_controller(id_data, sizeof(id_data));
-
-        /* 分块发送 C2HData */
-        chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-        while (offset < 4096) {
-            uint32_t this_chunk = (4096 - offset < chunk_size) ?
-                                  (4096 - offset) : chunk_size;
-            bool last = (offset + this_chunk >= 4096);
-            nvme_tcp_send_c2hdata(conn, cid, id_data + offset,
-                                  this_chunk, offset, last);
-            offset += this_chunk;
-        }
-
-        /* 发送完成 */
-        memset(&cpl, 0, sizeof(cpl));
-        cpl.cid = cpu_to_le16(cid);
-        cpl.sqid = cpu_to_le16(sqid);
-        cpl.status = cpu_to_le16(0x0000);
-        nvme_tcp_send_capsule_resp(conn, &cpl);
-        return RET_OK;
-    }
-
-    /* Identify Namespace List (CNS=0x02/0x10/0x11/0x12) 需要返回 4096 字节数据 */
+    /* 4. Identify: 统一处理4种CNS */
     if (cmd->opcode == NVME_ADMIN_IDENTIFY) {
         uint8_t cns = le32_to_cpu(cmd->cdw10) & 0xFF;
-        if (cns == 0x02 || cns == 0x10 || cns == 0x11 || cns == 0x12) {
-            uint8_t list_data[4096];
-            uint32_t chunk_size = 0;
-            uint32_t offset = 0;
+        uint8_t id_data[4096];
+        memset(id_data, 0, sizeof(id_data));
 
-            LOG_INFO("NVMe/TCP: Identify Namespace List, CNS=0x%02X", cns);
-
-            memset(list_data, 0, sizeof(list_data));
-            /* 第一个 NSID = 1 (小端) */
-            list_data[0] = 0x01; list_data[1] = 0x00;
-            list_data[2] = 0x00; list_data[3] = 0x00;
-
-            /* 分块发送 C2HData */
-            chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-            while (offset < 4096) {
-                uint32_t this_chunk = (4096 - offset < chunk_size) ?
-                                      (4096 - offset) : chunk_size;
-                bool last = (offset + this_chunk >= 4096);
-                nvme_tcp_send_c2hdata(conn, cid, list_data + offset,
-                                      this_chunk, offset, last);
-                offset += this_chunk;
-            }
-
-            /* 发送完成 */
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(0x0000);
-            nvme_tcp_send_capsule_resp(conn, &cpl);
-            return RET_OK;
-        }
-        /* CNS=0x03: Namespace Identification Descriptor list */
-        if (cns == 0x03) {
-            uint8_t desc_data[4096];
-            uint32_t chunk_size = 0;
-            uint32_t offset = 0;
-
-            LOG_INFO("NVMe/TCP: Identify NS Descriptor, CNS=0x03, NSID=%u",
-                     le32_to_cpu(cmd->nsid));
-
-            memset(desc_data, 0, sizeof(desc_data));
-            /* 描述符: NIDT=0x02(NGUID), NIDL=16, 保留2字节, NID=16字节 */
-            desc_data[0] = 0x02;  /* NIDT=NGUID */
-            desc_data[1] = 0x10;  /* NIDL=16 */
-            /* bytes 2-3: 保留 */
-            /* bytes 4-19: NGUID (16字节, 使用固定值) */
-            desc_data[4] = 0x01; desc_data[5] = 0x02;
-            desc_data[6] = 0x03; desc_data[7] = 0x04;
-            desc_data[8] = 0x05; desc_data[9] = 0x06;
-            desc_data[10] = 0x07; desc_data[11] = 0x08;
-            desc_data[12] = 0x09; desc_data[13] = 0x0A;
-            desc_data[14] = 0x0B; desc_data[15] = 0x0C;
-            desc_data[16] = 0x0D; desc_data[17] = 0x0E;
-            desc_data[18] = 0x0F; desc_data[19] = 0x10;
-
-            /* 分块发送 C2HData */
-            chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-            while (offset < 4096) {
-                uint32_t this_chunk = (4096 - offset < chunk_size) ?
-                                      (4096 - offset) : chunk_size;
-                bool last = (offset + this_chunk >= 4096);
-                nvme_tcp_send_c2hdata(conn, cid, desc_data + offset,
-                                      this_chunk, offset, last);
-                offset += this_chunk;
-            }
-
-            /* 发送完成 */
-            memset(&cpl, 0, sizeof(cpl));
-            cpl.cid = cpu_to_le16(cid);
-            cpl.sqid = cpu_to_le16(sqid);
-            cpl.status = cpu_to_le16(0x0000);
-            nvme_tcp_send_capsule_resp(conn, &cpl);
-            return RET_OK;
-        }
-    }
-
-    /* Identify Namespace 命令需要通过 C2HData 返回 4096 字节数据 */
-    if (cmd->opcode == NVME_ADMIN_IDENTIFY && (le32_to_cpu(cmd->cdw10) & 0xFF) == 0x00) {
-        uint8_t ns_data[4096];
-        uint32_t chunk_size = 0;
-        uint32_t offset = 0;
-        uint32_t nsid = le32_to_cpu(cmd->nsid);
-
-        LOG_INFO("NVMe/TCP: Identify Namespace, NSID=%u", nsid);
-
-        nvme_ctrl_fill_identify_namespace(ns_data, sizeof(ns_data), nsid);
-
-        /* 分块发送 C2HData */
-        chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-        while (offset < 4096) {
-            uint32_t this_chunk = (4096 - offset < chunk_size) ?
-                                  (4096 - offset) : chunk_size;
-            bool last = (offset + this_chunk >= 4096);
-            nvme_tcp_send_c2hdata(conn, cid, ns_data + offset,
-                                  this_chunk, offset, last);
-            offset += this_chunk;
+        switch (cns) {
+        case 0x01:
+            nvme_ctrl_fill_identify_controller(id_data, sizeof(id_data));
+            break;
+        case 0x00:
+            nvme_ctrl_fill_identify_namespace(id_data, sizeof(id_data),
+                                               le32_to_cpu(cmd->nsid));
+            break;
+        case 0x02: case 0x10: case 0x11: case 0x12:
+            id_data[0] = 0x01;
+            break;
+        case 0x03:
+            id_data[0] = 0x02;
+            id_data[1] = 0x10;
+            for (int i = 0; i < 16; i++) id_data[4 + i] = (uint8_t)(i + 1);
+            break;
         }
 
-        /* 发送完成 */
-        memset(&cpl, 0, sizeof(cpl));
-        cpl.cid = cpu_to_le16(cid);
-        cpl.sqid = cpu_to_le16(sqid);
-        cpl.status = cpu_to_le16(0x0000);
-        nvme_tcp_send_capsule_resp(conn, &cpl);
+        nvme_tcp_send_c2hdata_chunks(conn, cid, id_data, 4096);
+        nvme_tcp_send_completion(conn, cid, sqid, 0x0000);
         return RET_OK;
     }
 
-    /* Get Log Page 命令需要通过 C2HData 返回数据 (仅Admin队列 sqid==0) */
+    /* 5. Get Log Page */
     if (cmd->opcode == NVME_ADMIN_GET_LOG_PAGE && sqid == 0) {
         uint8_t lid = le32_to_cpu(cmd->cdw10) & 0xFF;
         uint32_t numd = (le32_to_cpu(cmd->cdw10) >> 16) & 0xFFFF;
         uint32_t log_len = (numd + 1) * 4;
         uint8_t log_data[4096];
-        uint32_t chunk_size = 0;
-        uint32_t offset = 0;
-
-        LOG_INFO("NVMe/TCP: Get Log Page, LID=0x%02X, NUMD=%u, data_len=%u",
-                 lid, numd, log_len);
-
         memset(log_data, 0, sizeof(log_data));
-
-        switch (lid) {
-        case 0x02:  /* SMART/Health Information */
+        if (lid == 0x02) {
             nvme_ctrl_fill_smart_log(log_data, log_len < 512 ? log_len : 512);
-            break;
-        default:
-            LOG_WARN("NVMe/TCP: 未支持的 Log Page LID=0x%02X", lid);
-            break;
         }
-
-        /* 分块发送 C2HData */
-        chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-        while (offset < log_len) {
-            uint32_t this_chunk = (log_len - offset < chunk_size) ?
-                                  (log_len - offset) : chunk_size;
-            bool last = (offset + this_chunk >= log_len);
-            nvme_tcp_send_c2hdata(conn, cid, log_data + offset,
-                                  this_chunk, offset, last);
-            offset += this_chunk;
-        }
-
-        /* 发送完成 */
-        memset(&cpl, 0, sizeof(cpl));
-        cpl.cid = cpu_to_le16(cid);
-        cpl.sqid = cpu_to_le16(sqid);
-        cpl.status = cpu_to_le16(0x0000);
-        nvme_tcp_send_capsule_resp(conn, &cpl);
+        nvme_tcp_send_c2hdata_chunks(conn, cid, log_data, log_len);
+        nvme_tcp_send_completion(conn, cid, sqid, 0x0000);
         return RET_OK;
     }
 
-    /* 其他命令：直接处理 */
+    /* 6. 其他命令：分发到 Admin/I/O 处理器 */
     memset(&cpl, 0, sizeof(cpl));
     cpl.cid = cpu_to_le16(cid);
     cpl.sqid = cpu_to_le16(sqid);
-
     if (sqid == 0) {
-        /* Admin 命令 */
         nvme_ctrl_process_admin_cmd(cmd, &cpl);
     } else {
-        /* I/O 命令 */
         nvme_ctrl_process_io_cmd(cmd, &cpl);
     }
-
-    /* 对于未支持的命令，临时返回成功（避免连接断开） */
-    /* 状态字段: bit15=Phase, bits14:1=状态码, bit0=保留 */
     if ((le16_to_cpu(cpl.status) & 0x7FFE) != 0) {
-        LOG_WARN("NVMe/TCP: 命令 opcode=0x%02X 处理返回错误 0x%04X, 临时改为成功",
-                 cmd->opcode, le16_to_cpu(cpl.status));
         cpl.status = cpu_to_le16(0x0000);
     }
 
-    /* Write Zeroes 命令：直接写零到 FTL（带小端转换） */
+    /* 7. Write Zeroes */
     if (cmd->opcode == NVME_IO_WRITE_ZEROES && sqid != 0) {
-        uint16_t nlb = (le16_to_cpu(cmd->cdw12) & 0xFFFF) + 1;
-        uint64_t slba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) |
-                        le32_to_cpu(cmd->cdw10);
+        nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
         uint8_t zero_buf[4096];
-        uint32_t i = 0;
         uint16_t wz = 0x0000;
-
-        LOG_INFO("NVMe/TCP: Write Zeroes, SLBA=%llu, NLB=%u",
-                 (unsigned long long)slba, nlb);
-
         memset(zero_buf, 0, sizeof(zero_buf));
-        for (i = 0; i < nlb; i++) {
+        for (uint32_t i = 0; i < nlb; i++) {
             if (ftl_write((uint32_t)(slba + i), zero_buf) != RET_OK) {
-                LOG_ERROR("NVMe/TCP: Write Zeroes FTL 写入失败, LPN=%llu",
-                          (unsigned long long)(slba + i));
-                wz = 0x0006;
-                break;
+                wz = 0x0006; break;
             }
         }
         cpl.status = cpu_to_le16(wz);
     }
 
-    /* 读命令：从 FTL 读取数据，发送 C2HData，再发送完成 */
+    /* 8. Read */
     if (cmd->opcode == NVME_IO_READ) {
-        uint16_t nlb = (le16_to_cpu(cmd->cdw12) & 0xFFFF) + 1;
-        uint64_t slba = ((uint64_t)le32_to_cpu(cmd->cdw11) << 32) |
-                        le32_to_cpu(cmd->cdw10);
+        nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
         transfer_len = nlb * 4096;
-
-        LOG_INFO("NVMe/TCP: 读命令, SLBA=%llu, NLB=%u, 数据长度=%u",
-                 (unsigned long long)slba, nlb, transfer_len);
-
         uint8_t *read_data = (uint8_t *)calloc(1, transfer_len);
         if (read_data != NULL) {
-            uint32_t i = 0;
-            /* 按页从 FTL 读取，未写入的页返回全零 */
-            for (i = 0; i < nlb; i++) {
-                ret_code_t ret = ftl_read((uint32_t)(slba + i),
-                                          read_data + i * 4096);
-                if (ret != RET_OK) {
-                    /* 未写入的页返回全零（NVMe 规范要求） */
+            for (uint32_t i = 0; i < nlb; i++) {
+                if (ftl_read((uint32_t)(slba + i), read_data + i * 4096) != RET_OK) {
                     memset(read_data + i * 4096, 0, 4096);
                 }
             }
-
-            /* 发送 C2HData（分块发送） */
-            uint32_t chunk_size = conn->maxh2cdata > 0 ? conn->maxh2cdata : 8192;
-            uint32_t offset = 0;
-            while (offset < transfer_len) {
-                uint32_t this_chunk = (transfer_len - offset < chunk_size) ?
-                                       (transfer_len - offset) : chunk_size;
-                bool last = (offset + this_chunk >= transfer_len);
-                nvme_tcp_send_c2hdata(conn, cid, read_data + offset,
-                                      this_chunk, offset, last);
-                offset += this_chunk;
-            }
+            nvme_tcp_send_c2hdata_chunks(conn, cid, read_data, transfer_len);
             free(read_data);
         } else {
             cpl.status = cpu_to_le16(0x0006);
         }
     }
 
-    /* 发送 CapsuleResp */
     nvme_tcp_send_capsule_resp(conn, &cpl);
-
     return RET_OK;
 }
 

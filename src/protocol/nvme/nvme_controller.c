@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nvme_controller.c
  * @brief NVMe 控制器协议栈实现
  * @details 企业级 NVMe 控制器协议栈完整实现，支持 NVMe 1.4 规范。
@@ -130,7 +130,7 @@ static void admin_identify(const nvme_command_t *cmd, nvme_completion_t *cpl)
         break;
     case 0x02:  /* Identify Active Namespace ID list */
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         set_completion_status(cpl, NVME_SC_INVALID_FIELD, g_nvme_ctrl.admin_cq.phase);
         return;
     }
@@ -152,7 +152,7 @@ static void admin_get_log_page(const nvme_command_t *cmd, nvme_completion_t *cpl
         break;
     case 0x01:  /* Error Information */
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         break;
     }
 
@@ -250,7 +250,7 @@ static void admin_set_features(const nvme_command_t *cmd, nvme_completion_t *cpl
     case 0x08:  /* Keep Alive Timeout */
         cpl->dw0 = cmd->cdw11;
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         cpl->dw0 = cmd->cdw11;
         break;
     }
@@ -413,6 +413,7 @@ ret_code_t nvme_ctrl_init(void)
     LOG_INFO("NVMe 控制器初始化完成，版本=1.4，命名空间大小=%llu LBA",
              (unsigned long long)g_nvme_ctrl.namespace_size);
 
+    /* 命令处理完成，返回RET_OK（执行结果通过cpl->status反映） */
     return RET_OK;
 }
 
@@ -431,6 +432,7 @@ ret_code_t nvme_ctrl_deinit(void)
     g_nvme_ctrl.initialized = false;
     g_nvme_ctrl.state = NVME_CTRL_STATE_RESET;
 
+    /* 命令处理完成，返回RET_OK（执行结果通过cpl->status反映） */
     return RET_OK;
 }
 
@@ -509,69 +511,103 @@ void nvme_ctrl_cq_doorbell(uint16_t qid, uint32_t value)
     LOG_DEBUG("NVMe CQ Doorbell: QID=%u, Head=%u, Tail=%u", qid, cq->head, cq->tail);
 }
 
+/**
+ * @brief NVMe Admin 命令分发处理
+ *
+ * 从 Admin 提交队列(SQ)取出命令后，根据操作码(opcode)分发到对应的处理函数。
+ * Admin 命令用于控制器管理和配置，不涉及用户数据读写。
+ *
+ * 支持的 Admin 命令（操作码 -> 处理方式）：
+ *   - 0x00 Delete I/O SQ       → 占位返回成功（简化实现）
+ *   - 0x01 Create I/O SQ       → admin_create_iosq（创建I/O提交队列）
+ *   - 0x02 Get Log Page         → admin_get_log_page（读取日志页，如SMART/Health）
+ *   - 0x04 Delete I/O CQ       → 占位返回成功
+ *   - 0x05 Create I/O CQ       → admin_create_iocq（创建I/O完成队列）
+ *   - 0x06 Identify             → admin_identify（识别控制器/命名空间）
+ *   - 0x08 Abort                → 占位返回成功
+ *   - 0x09 Set Features         → admin_set_features（设置控制器特性）
+ *   - 0x0A Get Features         → admin_get_features（获取控制器特性）
+ *   - 0x0C Async Event Request  → 占位返回成功
+ *   - 0x11 Firmware Download    → 占位返回成功
+ *   - 0x10 Firmware Activate   → 占位返回成功
+ *   - 0x80 Format NVM           → 占位返回成功
+ *   - 0x18 Keep Alive           → 占位返回成功
+ *   - 其他                       → 返回 NVME_SC_INVALID_OPCODE
+ *
+ * 处理流程：清零cpl → 设置cid/sqid → 根据opcode分发 → 设置状态码和phase → 返回RET_OK
+ *
+ * @param cmd NVMe 命令（包含 opcode 和命令双字 CDW0-CDW15）
+ * @param cpl 完成队列条目（输出参数，处理函数填充状态码）
+ * @return RET_OK 始终返回成功（命令执行结果通过 cpl->status 反映）
+ *
+ * @note 阶段位(phase)是 NVMe 完成队列机制：主机通过相位位翻转判断新的完成条目。
+ */
 ret_code_t nvme_ctrl_process_admin_cmd(const nvme_command_t *cmd, nvme_completion_t *cpl)
 {
+    /* 清零完成队列条目，设置命令ID和SQID（Admin SQ ID固定为0） */
     memset(cpl, 0, sizeof(nvme_completion_t));
-    cpl->cid = cmd->cid;
-    cpl->sqid = 0;  /* Admin SQ ID */
+    cpl->cid = cmd->cid;      /* 命令ID，主机用于匹配命令和完成 */
+    cpl->sqid = 0;             /* Admin SQ ID */
 
+    /* 根据操作码(opcode)分发到对应处理函数 */
     switch (cmd->opcode) {
-    case NVME_ADMIN_DELETE_IOSQ:
+    case NVME_ADMIN_DELETE_IOSQ: /* 删除I/O提交队列：简化实现 */
         LOG_INFO("NVMe Admin: Delete I/O SQ");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_CREATE_IOSQ:
+    case NVME_ADMIN_CREATE_IOSQ: /* 创建I/O提交队列：配置队列大小/内存地址/QID/优先级 */
         admin_create_iosq(cmd, cpl);
         break;
-    case NVME_ADMIN_GET_LOG_PAGE:
+    case NVME_ADMIN_GET_LOG_PAGE: /* 获取日志页：如SMART/Health Log(LID=0x02) */
         admin_get_log_page(cmd, cpl);
         break;
-    case NVME_ADMIN_DELETE_IOCQ:
+    case NVME_ADMIN_DELETE_IOCQ: /* 删除I/O完成队列：简化实现 */
         LOG_INFO("NVMe Admin: Delete I/O CQ");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_CREATE_IOCQ:
+    case NVME_ADMIN_CREATE_IOCQ: /* 创建I/O完成队列：配置队列大小/中断向量 */
         admin_create_iocq(cmd, cpl);
         break;
-    case NVME_ADMIN_IDENTIFY:
+    case NVME_ADMIN_IDENTIFY: /* 识别：返回控制器信息(ID_CTRL)或命名空间信息(ID_NS) */
         admin_identify(cmd, cpl);
         break;
-    case NVME_ADMIN_ABORT:
+    case NVME_ADMIN_ABORT: /* 中止命令：简化实现 */
         LOG_INFO("NVMe Admin: Abort");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_SET_FEATURES:
+    case NVME_ADMIN_SET_FEATURES: /* 设置特性：配置仲裁/电源管理/温度阈值 */
         admin_set_features(cmd, cpl);
         break;
-    case NVME_ADMIN_GET_FEATURES:
+    case NVME_ADMIN_GET_FEATURES: /* 获取特性：读取指定特性当前值 */
         admin_get_features(cmd, cpl);
         break;
-    case NVME_ADMIN_ASYNC_EVENT:
+    case NVME_ADMIN_ASYNC_EVENT: /* 异步事件请求：简化实现 */
         LOG_INFO("NVMe Admin: Async Event Request");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_FW_DOWNLOAD:
+    case NVME_ADMIN_FW_DOWNLOAD: /* 固件下载：简化实现，不支持固件更新 */
         LOG_INFO("NVMe Admin: Firmware Download");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_FW_ACTIVATE:
+    case NVME_ADMIN_FW_ACTIVATE: /* 固件激活：简化实现 */
         LOG_INFO("NVMe Admin: Firmware Activate");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_FORMAT_NVM:
+    case NVME_ADMIN_FORMAT_NVM: /* 格式化NVM：简化实现 */
         LOG_INFO("NVMe Admin: Format NVM");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    case NVME_ADMIN_KEEP_ALIVE:
+    case NVME_ADMIN_KEEP_ALIVE: /* 保活命令：维持控制器连接 */
         LOG_INFO("NVMe Admin: Keep Alive 命令");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.admin_cq.phase);
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         LOG_WARN("NVMe Admin: 未支持的操作码 0x%02X", cmd->opcode);
         set_completion_status(cpl, NVME_SC_INVALID_OPCODE, g_nvme_ctrl.admin_cq.phase);
         break;
     }
 
+    /* 命令处理完成，返回RET_OK（执行结果通过cpl->status反映） */
     return RET_OK;
 }
 
@@ -594,10 +630,12 @@ ret_code_t nvme_ctrl_process_admin_cmd(const nvme_command_t *cmd, nvme_completio
  */
 ret_code_t nvme_ctrl_process_io_cmd(const nvme_command_t *cmd, nvme_completion_t *cpl)
 {
+    /* 清零完成队列条目，设置命令ID和SQID（Admin SQ ID固定为0） */
     memset(cpl, 0, sizeof(nvme_completion_t));
-    cpl->cid = cmd->cid;
-    cpl->sqid = g_nvme_ctrl.io_sq.qid;
+    cpl->cid = cmd->cid;      /* 命令ID，主机用于匹配命令和完成 */
+    cpl->sqid = g_nvme_ctrl.io_sq.qid;  /* I/O SQ ID */
 
+    /* 根据操作码(opcode)分发到对应处理函数 */
     switch (cmd->opcode) {
     case NVME_IO_FLUSH:
         io_flush(cmd, cpl);
@@ -644,12 +682,13 @@ ret_code_t nvme_ctrl_process_io_cmd(const nvme_command_t *cmd, nvme_completion_t
         LOG_INFO("NVMe I/O: Verify");
         set_completion_status(cpl, NVME_SC_SUCCESS, g_nvme_ctrl.io_cq.phase);
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         LOG_WARN("NVMe I/O: 未支持的操作码 0x%02X", cmd->opcode);
         set_completion_status(cpl, NVME_SC_INVALID_OPCODE, g_nvme_ctrl.io_cq.phase);
         break;
     }
 
+    /* 命令处理完成，返回RET_OK（执行结果通过cpl->status反映） */
     return RET_OK;
 }
 
@@ -951,7 +990,7 @@ uint32_t nvme_ctrl_read_reg(uint32_t offset)
         return (uint32_t)(g_nvme_ctrl.regs.acq & 0xFFFFFFFF);
     case NVME_REG_ACQ + 4:
         return (uint32_t)(g_nvme_ctrl.regs.acq >> 32);
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         return 0;
     }
 }
@@ -983,7 +1022,7 @@ void nvme_ctrl_write_reg(uint32_t offset, uint32_t value)
     case NVME_REG_ACQ + 4:
         nvme_ctrl_write_acq(value, true);
         break;
-    default:
+    default: /* 未支持的操作码：返回无效操作码错误 */
         break;
     }
 }

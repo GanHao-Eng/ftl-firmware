@@ -1,7 +1,7 @@
 /**
  * @file thread.c
  * @brief 线程管理模块实现
- * @details 企业级固件的线程管理模块实现，基于 POSIX 线程库（pthread）。
+ * @details 线程管理模块实现，基于 POSIX 线程库（pthread）。
  *          提供线程创建、销毁、启动、停止、等待、状态查询等功能，
  *          以及互斥锁和条件变量等同步原语。模拟固件中的多任务调度，
  *          实际嵌入式固件中通常使用 RTOS（如 FreeRTOS、ThreadX）。

@@ -1,7 +1,7 @@
 /**
  * @file log.c
  * @brief 日志系统实现
- * @details 企业级固件的分级日志系统实现，支持 DEBUG/INFO/WARN/ERROR 四级日志。
+ * @details 分级日志系统实现，支持 DEBUG/INFO/WARN/ERROR 四级日志。
  *          支持控制台彩色输出和文件输出，自动添加时间戳、文件名和行号。
  *          通过宏 LOG_DEBUG/LOG_INFO/LOG_WARN/LOG_ERROR 调用，
  *          自动传递文件名和行号。

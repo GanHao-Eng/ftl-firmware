@@ -1,7 +1,7 @@
 /**
  * @file utils.h
  * @brief 工具函数接口
- * @details 企业级固件的通用工具函数
+ * @details 通用工具函数
  */
 
 #ifndef FIRMWARE_UTILS_H

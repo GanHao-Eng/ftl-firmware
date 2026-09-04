@@ -1,7 +1,7 @@
 /**
  * @file manager.h
  * @brief 管理模块
- * @details 企业级固件的管理模块，负责模块初始化、健康监控、错误处理等
+ * @details 管理模块，负责模块初始化、健康监控、错误处理等
  */
 
 #ifndef FIRMWARE_MANAGER_H

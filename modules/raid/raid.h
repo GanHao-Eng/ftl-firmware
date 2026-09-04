@@ -1,7 +1,7 @@
 /**
  * @file raid.h
  * @brief RAID 模块头文件
- * @details 企业级固件的 RAID（独立磁盘冗余阵列）模块接口
+ * @details  RAID（独立磁盘冗余阵列）模块接口
  *          支持 RAID 0（条带化）和 RAID 1（镜像）
  *          管理多个 FTL 实例，对上层暴露统一的逻辑块地址空间
  */

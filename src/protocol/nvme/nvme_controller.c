@@ -1,7 +1,7 @@
 ﻿/**
  * @file nvme_controller.c
  * @brief NVMe 控制器协议栈实现
- * @details 企业级 NVMe 控制器协议栈完整实现，支持 NVMe 1.4 规范。
+ * @details NVMe 控制器协议栈完整实现，支持 NVMe 1.4 规范。
  *          实现真实的 SQ/CQ 队列机制、Doorbell 处理、Admin/I/O 命令集、
  *          MSI/MSI-X 中断、命名空间管理。
  *

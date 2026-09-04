@@ -1,7 +1,7 @@
 /**
  * @file utils.c
  * @brief 工具函数实现
- * @details 企业级固件的通用工具函数实现，包括内存安全操作、字符串处理、
+ * @details 通用工具函数实现，包括内存安全操作、字符串处理、
  *          延时函数、CRC校验和版本信息管理
  */
 
@@ -117,7 +117,7 @@ static const firmware_version_t g_version = {
  * @retval RET_OK 拷贝成功
  * @retval RET_ERR_PARAM 参数错误（空指针）
  * @retval RET_ERR_OVERWRITE 目标缓冲区不足，防止缓冲区溢出
- * @details 企业级安全内存拷贝，在执行memcpy前检查目标缓冲区大小，
+ * @details 高安全内存拷贝，在执行memcpy前检查目标缓冲区大小，
  *          防止缓冲区溢出漏洞。这是CERT C安全编码标准的推荐做法。
  */
 ret_code_t utils_memcpy_safe(void *dst, uint32_t dst_size, const void *src, uint32_t src_size)
@@ -228,7 +228,7 @@ void utils_delay_ms(uint32_t ms)
  * @brief 微秒级延时
  * @param[in] us 延时微秒数
  * @note 简化实现，使用空循环模拟延时。实际精度取决于CPU主频，
- *       企业级固件应使用硬件定时器或高精度延时函数。
+ *       固件应使用硬件定时器或高精度延时函数。
  */
 void utils_delay_us(uint32_t us)
 {

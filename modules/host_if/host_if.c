@@ -1,7 +1,7 @@
 /**
  * @file host_if.c
  * @brief 主机接口模块实现
- * @details 企业级固件的主机接口模块实现，模拟 NVMe 协议接口
+ * @details 主机接口模块实现，模拟 NVMe 协议接口
  */
 
 #include "host_if.h"
@@ -43,7 +43,7 @@ typedef struct {
     uint32_t cq_count;         ///< 完成队列数量
     uint8_t phase_tag;         ///< 阶段标签
 
-    /* NVMe 企业级特性状态 */
+    /* NVMe 系统特性状态 */
     nvme_id_ctrl_t id_ctrl;    ///< Identify Controller 数据
     nvme_id_ns_t id_ns;        ///< Identify Namespace 数据
     nvme_smart_log_t smart_log;///< SMART/健康日志

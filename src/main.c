@@ -1,7 +1,7 @@
 ﻿/**
  * @file main.c
  * @brief FTL 固件主程序入口
- * @details 企业级 FTL 固件的主程序入口，初始化所有模块并运行主循环
+ * @details FTL 固件的主程序入口，初始化所有模块并运行主循环
  */
 
 #define _DEFAULT_SOURCE
@@ -523,6 +523,15 @@ static ret_code_t init_all_modules(void)
 
     printf("[固件] 开始初始化所有模块...\n\n");
 
+    /* 初始化 DMA 控制器 */
+    printf("[固件] 初始化 DMA 控制器...\n");
+    ret = dma_init();
+    if (ret != RET_OK) {
+        printf("[固件] DMA 控制器初始化失败\n");
+        return RET_ERR_INTERNAL;
+    }
+    printf("[固件] DMA 控制器初始化完成\n\n");
+
     /* 初始化消息队列 */
     printf("[固件] 初始化消息队列...\n");
     msg_queue_init(MODULE_NAND, 64U);
@@ -693,6 +702,11 @@ static void deinit_all_modules(void)
     printf("[固件] 反初始化 NAND 模块...\n");
     nand_deinit();
     printf("[固件] NAND 模块反初始化完成\n\n");
+
+    /* 反初始化 DMA 控制器 */
+    printf("[固件] 反初始化 DMA 控制器...\n");
+    dma_deinit();
+    printf("[固件] DMA 控制器反初始化完成\n\n");
 
     /* 销毁消息队列 */
     printf("[固件] 销毁消息队列...\n");
@@ -1351,11 +1365,11 @@ static int __attribute__((unused)) run_raid_test(void)
 }
 
 /* ============================================================
- *  企业级特性测试（NVMe Admin、SMART、PLP、DIF）
+ *  系统特性测试（NVMe Admin、SMART、PLP、DIF）
  * ============================================================ */
 
 /**
- * @brief 运行企业级特性测试
+ * @brief 运行系统特性测试
  * @return 0 成功，-1 失败
  */
 static int __attribute__((unused)) test_enterprise_features(void)
@@ -1364,7 +1378,7 @@ static int __attribute__((unused)) test_enterprise_features(void)
     ret_code_t ret;
 
     printf("\n========================================\n");
-    printf("    企业级特性测试\n");
+    printf("    系统特性测试\n");
     printf("========================================\n");
 
     /* ---------- 1. NVMe Admin 命令测试 ---------- */
@@ -1568,7 +1582,7 @@ static int __attribute__((unused)) test_enterprise_features(void)
     }
 
     printf("\n========================================\n");
-    printf("    企业级特性测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
+    printf("    系统特性测试结果: %s\n", pass ? "✅ 全部通过" : "❌ 部分失败");
     printf("========================================\n");
 
     return pass ? 0 : -1;

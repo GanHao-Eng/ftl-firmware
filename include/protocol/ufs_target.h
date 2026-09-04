@@ -143,7 +143,7 @@ typedef struct {
 } ufs_inquiry_data_t;
 
 /* ============================================================
- *  UFS 企业级特性数据结构
+ *  UFS 系统特性数据结构
  * ============================================================ */
 
 /**
@@ -244,7 +244,7 @@ ret_code_t ufs_target_process_cmd_with_retry(const ufs_cmd_request_t *request,
 ret_code_t ufs_target_get_capacity(uint64_t *total_sectors, uint32_t *sector_size);
 
 /* ============================================================
- *  UFS 企业级特性接口
+ *  UFS 系统特性接口
  * ============================================================ */
 
 /**

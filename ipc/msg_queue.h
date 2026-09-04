@@ -1,7 +1,7 @@
 /**
  * @file msg_queue.h
  * @brief 消息队列接口
- * @details 企业级固件模块间通信的消息队列机制
+ * @details 固件模块间通信的消息队列机制
  */
 
 #ifndef FIRMWARE_MSG_QUEUE_H

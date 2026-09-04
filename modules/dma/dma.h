@@ -1,7 +1,7 @@
 /**
  * @file dma.h
  * @brief DMA 模块
- * @details 企业级固件的 DMA（直接内存访问）模块，模拟硬件 DMA 控制器
+ * @details DMA（直接内存访问）模块，模拟硬件 DMA 控制器
  *          提供异步数据传输功能，减少 CPU 占用，提高系统性能
  */
 

@@ -1,7 +1,7 @@
 /**
  * @file host_if.h
  * @brief 主机接口模块
- * @details 企业级固件的主机接口模块，模拟 NVMe 协议接口
+ * @details 主机接口模块，模拟 NVMe 协议接口
  */
 
 #ifndef FIRMWARE_HOST_IF_H

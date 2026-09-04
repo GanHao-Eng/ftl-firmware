@@ -238,7 +238,7 @@ ret_code_t nand_init(const char *file_path)
                         g_phy_blocks[blk].state = BLOCK_USED;
                         valid_pages++;
                     }
-                }
+            }
             }
         }
         LOG_INFO("NAND 恢复模式: 从OOB重建 %u 个有效页", valid_pages);
@@ -327,7 +327,6 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
                     LOG_WARN("NAND ECC: 块%u页%u检测到无法纠正的多位错误", block, page);
                 }
             }
-        }
     }
 
     /* 统计读取次数 */

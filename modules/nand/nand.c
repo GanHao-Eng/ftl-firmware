@@ -3,6 +3,7 @@
  * @brief NAND Flash 模拟模块实现
  * @details 通过文件模拟 NAND 物理介质，实现页读写、块擦除、坏块管理、磨损计数等功能
  */
+#define _DEFAULT_SOURCE
 #include "nand.h"
 #include "log.h"
 #include <stdio.h>

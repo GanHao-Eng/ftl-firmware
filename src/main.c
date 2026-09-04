@@ -21,7 +21,7 @@
 #include "dma.h"
 #include "raid.h"
 #include "protocol/nvme_tcp_target.h"
-#include "protocol/nvme_controller.h"
+#include "protocol/nvme_controller.h"`r`n#include "protocol/ufs_target.h"`r`n#include "hal/os_abstract.h"
 
 /* ============================================================
  *  全局配置
@@ -30,6 +30,133 @@
 /** @brief FTL 元数据快照文件路径（掉电保护持久化） */
 #define FTL_SNAPSHOT_FILE  "ftl_snapshot.bin"
 
+
+/* ============================================================
+ *  任务管理框架（FreeRTOS 风格）
+ *
+ *  设计参考 FreeRTOS 任务调度：
+ *  - 每个任务有独立的栈、优先级、名称
+ *  - 任务通过 os_thread_create 创建，由 OS 调度器调度
+ *  - 任务间通过消息队列(msg_queue)通信，避免共享数据竞争
+ *  - 任务状态：READY/RUNNING/BLOCKED/SUSPENDED
+ * ============================================================ */
+
+/** @brief 任务优先级定义（数值越大优先级越高，参考 FreeRTOS） */
+typedef enum {
+    TASK_PRIORITY_IDLE      = 0,   ///< 空闲任务（最低）
+    TASK_PRIORITY_LOW       = 1,   ///< 低优先级（后台任务、测试任务）
+    TASK_PRIORITY_NORMAL    = 2,   ///< 普通优先级（常规业务）
+    TASK_PRIORITY_HIGH      = 3,   ///< 高优先级（NVMe/TCP 服务）
+    TASK_PRIORITY_REALTIME  = 4,   ///< 实时优先级（中断处理、看门狗）
+} task_priority_t;
+
+/** @brief 任务状态 */
+typedef enum {
+    TASK_STATE_READY = 0,    ///< 就绪，等待调度
+    TASK_STATE_RUNNING,      ///< 运行中
+    TASK_STATE_BLOCKED,      ///< 阻塞（等待消息/延时）
+    TASK_STATE_SUSPENDED,    ///< 挂起
+    TASK_STATE_FINISHED,     ///< 已结束
+} task_state_t;
+
+/** @brief 任务控制块（TCB, Task Control Block），参考 FreeRTOS TCB */
+typedef struct {
+    const char        *name;          ///< 任务名称（调试用）
+    os_thread_func_t  entry;          ///< 任务入口函数
+    void              *arg;           ///< 任务参数
+    task_priority_t   priority;       ///< 任务优先级
+    uint32_t          stack_size;     ///< 栈大小（字节）
+    os_thread_t       handle;         ///< 线程句柄（OS 抽象层）
+    task_state_t      state;          ///< 任务状态
+    uint32_t          run_count;      ///< 运行次数统计（调试用）
+} task_tcb_t;
+
+/** @brief 全局任务表（静态分配，避免动态内存碎片） */
+#define MAX_TASKS  16
+static task_tcb_t g_task_table[MAX_TASKS];
+static uint32_t   g_task_count = 0;
+
+/**
+ * @brief 注册任务到任务表
+ * @param[in] name       任务名称
+ * @param[in] entry      任务入口函数
+ * @param[in] arg        任务参数
+ * @param[in] priority   任务优先级
+ * @param[in] stack_size 栈大小
+ * @return 任务索引，失败返回 -1
+ */
+static int task_register(const char *name, os_thread_func_t entry, void *arg,
+                          task_priority_t priority, uint32_t stack_size)
+{
+    if (g_task_count >= MAX_TASKS) {
+        printf("[任务管理] 任务表已满，无法注册任务 %s\n", name);
+        return -1;
+    }
+    task_tcb_t *tcb = &g_task_table[g_task_count];
+    tcb->name       = name;
+    tcb->entry      = entry;
+    tcb->arg        = arg;
+    tcb->priority   = priority;
+    tcb->stack_size = stack_size;
+    tcb->handle     = NULL;
+    tcb->state      = TASK_STATE_READY;
+    tcb->run_count  = 0;
+    printf("[任务管理] 注册任务: %s (优先级=%d, 栈=%u字节)\n",
+           name, priority, stack_size);
+    return (int)g_task_count++;
+}
+
+/**
+ * @brief 启动所有已注册任务（创建线程）
+ * @return 成功启动的任务数
+ */
+static uint32_t task_start_all(void)
+{
+    uint32_t started = 0;
+    uint32_t i = 0;
+    printf("\n[任务管理] 启动 %u 个任务...\n", g_task_count);
+    for (i = 0; i < g_task_count; i++) {
+        task_tcb_t *tcb = &g_task_table[i];
+        tcb->handle = os_thread_create(tcb->entry, tcb->arg, tcb->name,
+                                        (uint32_t)tcb->priority, tcb->stack_size);
+        if (tcb->handle != NULL) {
+            tcb->state = TASK_STATE_RUNNING;
+            started++;
+            printf("[任务管理] 任务 %s 启动成功\n", tcb->name);
+        } else {
+            printf("[任务管理] 任务 %s 启动失败\n", tcb->name);
+        }
+    }
+    printf("[任务管理] 成功启动 %u/%u 个任务\n\n", started, g_task_count);
+    return started;
+}
+
+/**
+ * @brief 打印所有任务状态（调试用，类似 FreeRTOS task list）
+ */
+static void task_print_status(void)
+{
+    uint32_t i = 0;
+    printf("\n========================================\n");
+    printf("  任务状态表 (FreeRTOS 风格)\n");
+    printf("========================================\n");
+    printf("  %-20s %-8s %-10s %-8s\n", "任务名", "优先级", "状态", "运行次数");
+    printf("  ----------------------------------------\n");
+    for (i = 0; i < g_task_count; i++) {
+        task_tcb_t *tcb = &g_task_table[i];
+        const char *state_str = "UNKNOWN";
+        switch (tcb->state) {
+        case TASK_STATE_READY:     state_str = "READY"; break;
+        case TASK_STATE_RUNNING:   state_str = "RUNNING"; break;
+        case TASK_STATE_BLOCKED:   state_str = "BLOCKED"; break;
+        case TASK_STATE_SUSPENDED: state_str = "SUSPENDED"; break;
+        case TASK_STATE_FINISHED:  state_str = "FINISHED"; break;
+        }
+        printf("  %-20s %-8d %-10s %-8u\n",
+               tcb->name, tcb->priority, state_str, tcb->run_count);
+    }
+    printf("========================================\n\n");
+}
 /** @brief 快照保存间隔（每 N 次主循环保存一次） */
 #define FTL_SNAPSHOT_INTERVAL  5000U
 
@@ -214,6 +341,22 @@ static ret_code_t init_all_modules(void)
     }
     printf("[固件] NVMe/TCP 目标端初始化完成，监听端口 %u\n\n", tcp_config.port);
 
+
+    /* 初始化 UFS 目标端（Universal Flash Storage）
+     * UFS 基于 SCSI 命令集，通过 UPIU 协议与主机通信
+     * 当前实现应用层和传输层框架，链路层/物理层由硬件实现 */
+    printf("[固件] 初始化 UFS 目标端...\n");
+    ret = ufs_target_init();
+    if (ret != RET_OK) {
+        printf("[固件] UFS 目标端初始化失败（非致命，继续运行）\n");
+    } else {
+        uint64_t total_sectors = 0;
+        uint32_t sector_size = 0;
+        ufs_target_get_capacity(&total_sectors, &sector_size);
+        printf("[固件] UFS 目标端初始化完成: 容量=%llu扇区, 扇区大小=%u字节\n",
+               (unsigned long long)total_sectors, sector_size);
+    }
+    printf("\n");
     /* 初始化管理模块 */
     printf("[固件] 初始化管理模块...\n");
     ret = manager_init(&g_default_fw_config);
@@ -1206,17 +1349,41 @@ int main(int argc, char *argv[])
     printf("  自动恢复:     %s\n", g_default_fw_config.auto_recovery ? "启用" : "禁用");
     printf("\n");
 
-    /* 初始化所有模块 */
+    /* 初始化所有模块（含 UFS 协议栈） */
     ret = init_all_modules();
     if (ret != RET_OK) {
         printf("[固件] 模块初始化失败\n");
         return -1;
     }
 
-    /* 直接进入 NVMe/TCP 服务主循环 */
-    result = firmware_main_loop();
+    /* ============================================================
+     *  任务注册（FreeRTOS 风格，按优先级从高到低）
+     * ============================================================ */
+    printf("\n[固件] 注册系统任务...\n");
+    task_register("NVMe-TCP-Service", task_nvme_tcp_service, NULL, TASK_PRIORITY_HIGH, 64 * 1024);
+    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
+    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
 
-    /* 反初始化所有模块 */
+    uint32_t started = task_start_all();
+    if (started == 0) {
+        printf("[固件] 错误：没有任务成功启动\n");
+        deinit_all_modules();
+        return -1;
+    }
+    task_print_status();
+
+    printf("[固件] 进入多任务运行模式（Ctrl+C 退出）...\n\n");
+    uint32_t main_loop_count = 0;
+    while (1) {
+        main_loop_count++;
+        os_delay_ms(1000);
+        if (main_loop_count % 60 == 0) {
+            printf("[主线程] 运行中: 循环次数=%u, 任务数=%u\n", main_loop_count, g_task_count);
+        }
+    }
+
     deinit_all_modules();
 
     /* 打印最终状态 */

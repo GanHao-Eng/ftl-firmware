@@ -1,4 +1,4 @@
-# NVMe SSD固件开发：FTL算法栈与NVMe/TCP协议栈实现
+﻿# NVMe SSD固件开发：FTL算法栈与NVMe/TCP协议栈实现
 
 一套完整的SSD固件参考实现，涵盖NAND闪存抽象层、FTL闪存转换层、NVMe控制器及NVMe/TCP目标端协议栈，可与Linux内核nvme-tcp驱动真实对接，支持nvme-cli、fio等标准存储工具的功能验证与性能测试。
 
@@ -33,7 +33,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/Tomjason1/ftl-firmware.git
+git clone https://github.com/GanHao-Eng/ftl-firmware.git
 cd ftl-firmware
 
 # 编译固件
@@ -570,6 +570,33 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 | 可扩展性 | 一般 | 优秀 |
 | 企业级特性 | 基础 | 完整 |
 
+## 多任务架构（FreeRTOS 风格）
+
+本项目采用 FreeRTOS 风格的多任务调度架构，每个功能模块独立线程运行，通过消息队列通信，避免共享数据竞争。
+
+### 任务列表
+
+| 任务名 | 优先级 | 栈大小 | 职责 |
+|--------|--------|--------|------|
+| NVMe-TCP-Service | HIGH (3) | 64KB | NVMe/TCP 前端接口服务，处理主机命令 |
+| Heartbeat-Monitor | NORMAL (2) | 16KB | 心跳与健康监控，定期保存快照，WAF统计 |
+| FTL-Unit-Test | LOW (1) | 32KB | FTL 层单元测试（后台验证） |
+| GC-Benchmark | LOW (1) | 32KB | GC 算法性能基准测试（后台分析） |
+| Task-Monitor | IDLE (0) | 8KB | 任务状态监控，定期打印任务表 |
+
+### 任务管理框架
+
+- **任务控制块(TCB)**：参考 FreeRTOS TCB，包含名称、入口、优先级、栈大小、状态、运行次数
+- **任务表**：静态分配 MAX_TASKS=16 个任务槽位，避免动态内存碎片
+- **优先级**：5级优先级（IDLE/LOW/NORMAL/HIGH/REALTIME），数值越大优先级越高
+- **任务状态**：READY/RUNNING/BLOCKED/SUSPENDED/FINISHED
+- **OS 抽象层**：通过 `os_thread_create()` 创建线程，Linux 平台基于 POSIX pthread，可移植到 FreeRTOS
+
+### 任务间通信
+
+- **消息队列(msg_queue)**：模块间通过消息队列异步通信，支持优先级排序
+- **互斥锁(os_mutex)**：保护共享资源，避免竞态条件
+- **无共享数据**：任务间不直接共享全局变量，所有数据通过消息传递
 ## 扩展方向
 
 1. **接入真实 NVMe 协议** - 对接 QEMU 或真实硬件
@@ -657,3 +684,60 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 ## 许可证
 
 MIT License
+
+
+## 未实现功能与扩展路线图
+
+### P0 - 核心功能（高优先级）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| NVMe 多队列完整支持 | ⚠️ 部分 | 当前支持 Admin+1个I/O队列，需支持多I/O队列和中断向量 |
+| NVMe 中断处理 | ❌ 未实现 | 当前轮询模式，需实现 MSI-X 中断和中断处理线程 |
+| SGL/PRP 数据传输 | ⚠️ 部分 | 当前简化实现，需完整支持 SGL(Scatter Gather List) |
+| 命名空间管理 | ⚠️ 部分 | 当前单命名空间，需支持多命名空间、NS Attach/Detach |
+| 安全协议(TPer/SED) | ❌ 未实现 | 自加密驱动器支持，TCG Opal 协议 |
+
+### P1 - 企业级特性（中优先级）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 端到端数据保护(DIF/DIX) | ❌ 未实现 | T10 DIF/DIX，CRC校验+应用标签 |
+| 持久化内存区域(PMR) | ❌ 未实现 | NVMe 1.4 Persistent Memory Region |
+| 固件更新( Firmware Update) | ⚠️ 框架 | 命令已占位，需实现固件下载/激活/回滚 |
+| 异步事件请求(AER) | ⚠️ 框架 | 命令已占位，需实现事件上报机制 |
+| 温度传感器(TSensor) | ⚠️ 部分 | 需实现多温度传感器和温度阈值告警 |
+| 预测性延迟分析 | ❌ 未实现 | 基于机器学习的延迟预测和性能优化 |
+
+### P2 - 性能优化（低优先级）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 多通道/多Die并行 | ⚠️ 部分 | 当前单通道模拟，需支持多通道和Die间流水线 |
+| 缓存层(DRAM Cache) | ❌ 未实现 | 读写缓存、写回策略、缓存刷新 |
+| 压缩/去重 | ❌ 未实现 | 在线数据压缩、重复数据删除 |
+| 加密(AES-XTS) | ❌ 未实现 | 全盘加密、AES-XTS 256位 |
+| ZNS(Zoned Namespace) | ❌ 未实现 | NVMe Zoned Namespace，SMR 硬盘支持 |
+| KV(Key-Value) SSD | ❌ 未实现 | Key-Value 接口，绕过块层 |
+
+### P3 - 平台移植（长期）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| FreeRTOS 移植 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现 FreeRTOS 平台层 |
+| RT-Thread 移植 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现 RT-Thread 平台层 |
+| 裸机部署 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现裸机调度器 |
+| FPGA 硬件加速 | ❌ 未实现 | ECC/CRC/加解密硬件加速，参考 Cosmos+ OpenSSD |
+| 真实 NAND 对接 | ❌ 未实现 | 对接 Toggle DDR NAND 或 ONFI NAND 真实芯片 |
+
+### 测试覆盖扩展
+
+| 测试项 | 状态 | 说明 |
+|------|------|------|
+| FTL 单元测试 | ✅ 25项 | 初始化、读写、覆盖、TRIM、GC、未写入页 |
+| GC 算法基准 | ✅ 6种算法 | Greedy/Cost-Benefit/CAT/Windowed/d-Choices/FRA |
+| PLP 恢复测试 | ✅ 25项 | 快照保存/加载、覆盖恢复、TRIM恢复、容错 |
+| NVMe 协议一致性测试 | ❌ 未实现 | 对接 nvme-compliance 测试套件 |
+| 性能基准测试 | ⚠️ 部分 | fio 顺序/随机读写，需扩展 4K/8K/16K 混合负载 |
+| 压力测试 | ❌ 未实现 | 长时间运行、内存泄漏、错误注入测试 |
+| 故障注入测试 | ❌ 未实现 | NAND 读错误、写失败、擦除失败、掉电模拟 |

@@ -36,7 +36,7 @@
 
 
 /* ============================================================
- *  任务函数前向声明（FreeRTOS 风格任务入口）
+ *  任务函数前向声明
  *  每个任务独立线程，通过消息队列通信，避免共享数据竞争
  * ============================================================ */
 static void __attribute__((unused)) task_nvme_tcp_service(void *arg);    ///< NVMe/TCP 前端接口服务任务（高优先级）
@@ -45,16 +45,16 @@ static void task_ftl_unit_test(void *arg);         ///< FTL 单元测试任务�
 static void task_gc_benchmark(void *arg);          ///< GC 算法基准测试任务（低优先级，后台分析）
 static void task_status_monitor(void *arg);         ///< 任务状态监控任务（空闲优先级，调试用）
 /* ============================================================
- *  任务管理框架（FreeRTOS 风格）
+ *  任务管理框架
  *
- *  设计参考 FreeRTOS 任务调度：
+ *  采用优先级调度设计：
  *  - 每个任务有独立的栈、优先级、名称
  *  - 任务通过 os_thread_create 创建，由 OS 调度器调度
  *  - 任务间通过消息队列(msg_queue)通信，避免共享数据竞争
  *  - 任务状态：READY/RUNNING/BLOCKED/SUSPENDED
  * ============================================================ */
 
-/** @brief 任务优先级定义（数值越大优先级越高，参考 FreeRTOS） */
+/** @brief 任务优先级定义（数值越大优先级越高，） */
 typedef enum {
     TASK_PRIORITY_IDLE      = 0,   ///< 空闲任务（最低）
     TASK_PRIORITY_LOW       = 1,   ///< 低优先级（后台任务、测试任务）
@@ -72,7 +72,7 @@ typedef enum {
     TASK_STATE_FINISHED,     ///< 已结束
 } task_state_t;
 
-/** @brief 任务控制块（TCB, Task Control Block），参考 FreeRTOS TCB */
+/** @brief 任务控制块（TCB, Task Control Block） */
 typedef struct {
     const char        *name;          ///< 任务名称（调试用）
     os_thread_func_t  entry;          ///< 任务入口函数
@@ -145,7 +145,7 @@ static uint32_t task_start_all(void)
 }
 
 /**
- * @brief 打印所有任务状态（调试用，类似 FreeRTOS task list）
+ * @brief 打印所有任务状态（调试用）
  */
 static void task_print_status(void)
 {
@@ -259,7 +259,7 @@ static int __attribute__((unused)) firmware_main_loop(void)
 static log_level_t g_log_level = LOG_LEVEL_WARN;
 
 /* ============================================================
- *  任务函数实现（FreeRTOS 风格任务入口）
+ *  任务函数实现
  *  每个任务独立线程，通过消息队列通信，避免共享数据竞争
  * ============================================================ */
 
@@ -1624,7 +1624,7 @@ int main(int argc, char *argv[])
     }
 
     /* ============================================================
-     *  任务注册（FreeRTOS 风格，按优先级从高到低）
+     *  任务注册（按优先级从高到低）
      * ============================================================ */
     printf("\n[固件] 注册系统任务...\n");
     /* NVMe/TCP核心业务在主线程运行（确保最低延迟），不注册为独立任务 */

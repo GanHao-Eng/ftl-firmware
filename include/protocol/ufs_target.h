@@ -24,6 +24,10 @@
 #define UFS_MAX_LUNS          8U     ///< 最大逻辑单元数
 #define UFS_MAX_CMD_QUEUE     32U    ///< 最大命令队列深度
 #define UFS_SECTOR_SIZE       512U   ///< 扇区大小（UFS默认512字节）
+#define UFS_MAX_RETRY_COUNT   3U     ///< 命令最大重试次数
+#define UFS_TEMP_WARNING_THRESHOLD  70  ///< 温度告警阈值（摄氏度）
+#define UFS_TEMP_CRITICAL_THRESHOLD 85  ///< 温度严重阈值（摄氏度）
+#define UFS_LIFETIME_WARNING_PERCENT 80 ///< 寿命告警阈值（百分比）
 
 /* UFS 命令状态码 */
 #define UFS_STATUS_GOOD           0x00U  ///< 命令成功完成
@@ -41,6 +45,13 @@
 #define SCSI_OP_READ_CAPACITY_10  0x25U  ///< 读容量（10字节）
 #define SCSI_OP_SYNCHRONIZE_CACHE 0x35U  ///< 同步缓存（Flush）
 #define SCSI_OP_UNMAP             0x42U  ///< 取消映射（TRIM）
+#define SCSI_OP_MODE_SENSE_6      0x1AU  ///< 模式感知（6字节）
+#define SCSI_OP_MODE_SELECT_6     0x15U  ///< 模式选择（6字节）
+#define SCSI_OP_LOG_SENSE         0x4DU  ///< 日志感知
+#define SCSI_OP_START_STOP_UNIT   0x1BU  ///< 启动/停止单元（电源管理）
+#define SCSI_OP_PREVENT_ALLOW_MEDIUM_REMOVAL 0x1EU  ///< 禁止/允许介质移除（写保护）
+#define SCSI_OP_SECURITY_PROTOCOL_IN  0xA2U  ///< 安全协议输入
+#define SCSI_OP_SECURITY_PROTOCOL_OUT 0xB5U  ///< 安全协议输出
 
 /* ============================================================
  *  UPIU 事务类型
@@ -132,6 +143,57 @@ typedef struct {
 } ufs_inquiry_data_t;
 
 /* ============================================================
+ *  UFS 企业级特性数据结构
+ * ============================================================ */
+
+/**
+ * @brief UFS电源模式枚举
+ */
+typedef enum {
+    UFS_POWER_MODE_ACTIVE   = 0,  ///< 活跃模式（正常工作）
+    UFS_POWER_MODE_IDLE     = 1,  ///< 空闲模式（低功耗，快速唤醒）
+    UFS_POWER_MODE_SLEEP    = 2,  ///< 休眠模式（最低功耗，唤醒延迟较高）
+    UFS_POWER_MODE_POWER_DOWN = 3, ///< 掉电模式（完全关闭）
+} ufs_power_mode_t;
+
+/**
+ * @brief UFS健康状态信息
+ */
+typedef struct {
+    int32_t  temperature;          ///< 当前温度（摄氏度）
+    uint32_t lifetime_used_percent;///< 已用寿命百分比（0-100）
+    uint32_t total_erase_count;    ///< 总擦除次数
+    uint32_t power_on_count;       ///< 上电次数
+    uint32_t power_on_minutes;     ///< 累计上电时间（分钟）
+    uint32_t unsafe_shutdown_count;///< 非正常关机次数
+    bool     temperature_warning;   ///< 温度告警标志
+    bool     lifetime_warning;      ///< 寿命告警标志
+    bool     write_protected;       ///< 写保护标志
+} ufs_health_info_t;
+
+/**
+ * @brief UFS错误统计信息
+ */
+typedef struct {
+    uint32_t total_cmd_count;       ///< 总命令数
+    uint32_t success_count;         ///< 成功完成数
+    uint32_t retry_count;           ///< 重试次数
+    uint32_t failure_count;         ///< 失败次数
+    uint32_t media_error_count;     ///< 介质错误数
+    uint32_t timeout_error_count;   ///< 超时错误数
+} ufs_error_stats_t;
+
+/**
+ * @brief UFS命令队列条目
+ */
+typedef struct {
+    bool     valid;                  ///< 条目有效标志
+    uint8_t  task_id;               ///< 任务ID
+    uint8_t  retry_count;           ///< 已重试次数
+    ufs_cmd_request_t request;      ///< 命令请求
+} ufs_cmd_queue_entry_t;
+
+/* ============================================================
  *  UFS 目标端接口
  * ============================================================ */
 
@@ -167,5 +229,72 @@ ret_code_t ufs_target_process_cmd(const ufs_cmd_request_t *request,
  * @retval RET_OK 成功
  */
 ret_code_t ufs_target_get_capacity(uint64_t *total_sectors, uint32_t *sector_size);
+
+/* ============================================================
+ *  UFS 企业级特性接口
+ * ============================================================ */
+
+/**
+ * @brief 设置UFS电源模式
+ * @param[in] mode 电源模式
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t ufs_target_set_power_mode(ufs_power_mode_t mode);
+
+/**
+ * @brief 获取当前电源模式
+ * @return 当前电源模式
+ */
+ufs_power_mode_t ufs_target_get_power_mode(void);
+
+/**
+ * @brief 获取UFS健康状态信息
+ * @param[out] info 健康状态信息
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t ufs_target_get_health_info(ufs_health_info_t *info);
+
+/**
+ * @brief 获取UFS错误统计信息
+ * @param[out] stats 错误统计信息
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t ufs_target_get_error_stats(ufs_error_stats_t *stats);
+
+/**
+ * @brief 重置错误统计信息
+ * @retval RET_OK 成功
+ */
+ret_code_t ufs_target_reset_error_stats(void);
+
+/**
+ * @brief 设置写保护状态
+ * @param[in] enable true=启用写保护, false=禁用写保护
+ * @retval RET_OK 成功
+ */
+ret_code_t ufs_target_set_write_protect(bool enable);
+
+/**
+ * @brief 获取写保护状态
+ * @return true=写保护启用, false=写保护禁用
+ */
+bool ufs_target_get_write_protect(void);
+
+/**
+ * @brief 后台操作触发（BKOPS - Background Operations）
+ * @details 触发垃圾回收、磨损均衡等后台操作
+ * @retval RET_OK 成功
+ */
+ret_code_t ufs_target_trigger_background_ops(void);
+
+/**
+ * @brief UFS健康监控周期处理
+ * @details 应定期调用，更新温度、寿命等健康指标
+ * @retval RET_OK 成功
+ */
+ret_code_t ufs_target_health_monitor_process(void);
 
 #endif /* UFS_TARGET_H */

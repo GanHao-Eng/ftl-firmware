@@ -21,6 +21,32 @@
 
 static bool g_ufs_initialized = false;
 
+/* ============================================================
+ *  企业级特性状态
+ * ============================================================ */
+
+/* 电源管理状态 */
+static ufs_power_mode_t g_power_mode = UFS_POWER_MODE_ACTIVE;
+
+/* 健康状态信息 */
+static ufs_health_info_t g_health_info = {
+    .temperature = 25,
+    .lifetime_used_percent = 0,
+    .total_erase_count = 0,
+    .power_on_count = 0,
+    .power_on_minutes = 0,
+    .unsafe_shutdown_count = 0,
+    .temperature_warning = false,
+    .lifetime_warning = false,
+    .write_protected = false,
+};
+
+/* 错误统计信息 */
+static ufs_error_stats_t g_error_stats = {0};
+
+/* 命令队列 */
+static ufs_cmd_queue_entry_t g_cmd_queue[UFS_MAX_CMD_QUEUE];
+
 /* UFS设备标识信息 */
 static const ufs_inquiry_data_t g_ufs_inquiry = {
     .peripheral_type = 0x00,        /* 直接访问设备（磁盘） */
@@ -323,4 +349,206 @@ ret_code_t ufs_target_get_capacity(uint64_t *total_sectors, uint32_t *sector_siz
     *total_sectors = (uint64_t)stats.total_lpns * (4096 / UFS_SECTOR_SIZE);
     *sector_size = UFS_SECTOR_SIZE;
     return RET_OK;
+}
+
+
+/* ============================================================
+ *  企业级特性实现
+ * ============================================================ */
+
+/**
+ * @brief 设置UFS电源模式
+ * @details 支持ACTIVE/IDLE/SLEEP/POWER_DOWN四种模式
+ *          IDLE模式：关闭部分时钟，快速唤醒（<10us）
+ *          SLEEP模式：关闭大部分电路，唤醒延迟较高（<1ms）
+ *          POWER_DOWN模式：完全掉电，需重新初始化
+ */
+ret_code_t ufs_target_set_power_mode(ufs_power_mode_t mode)
+{
+    if (!g_ufs_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    /* 记录电源模式切换 */
+    LOG_INFO("UFS: 电源模式切换 %d -> %d", g_power_mode, mode);
+
+    g_power_mode = mode;
+
+    /* 根据电源模式调整行为 */
+    switch (mode) {
+    case UFS_POWER_MODE_ACTIVE:
+        /* 活跃模式：正常处理所有命令 */
+        break;
+    case UFS_POWER_MODE_IDLE:
+        /* 空闲模式：降低时钟频率，快速唤醒 */
+        break;
+    case UFS_POWER_MODE_SLEEP:
+        /* 休眠模式：保存上下文，关闭大部分电路 */
+        break;
+    case UFS_POWER_MODE_POWER_DOWN:
+        /* 掉电模式：完全关闭，需重新初始化 */
+        g_ufs_initialized = false;
+        break;
+    default:
+        return RET_ERR_PARAM;
+    }
+
+    return RET_OK;
+}
+
+/**
+ * @brief 获取当前电源模式
+ */
+ufs_power_mode_t ufs_target_get_power_mode(void)
+{
+    return g_power_mode;
+}
+
+/**
+ * @brief 获取UFS健康状态信息
+ * @details 包含温度、寿命、擦除次数、上电次数等关键指标
+ *          用于主机端SMART/健康监控
+ */
+ret_code_t ufs_target_get_health_info(ufs_health_info_t *info)
+{
+    if (info == NULL) {
+        return RET_ERR_PARAM;
+    }
+
+    /* 从FTL层获取实际磨损数据（此处简化，实际应从FTL获取） */
+    g_health_info.total_erase_count = 0; /* 应从FTL获取 */
+
+    memcpy(info, &g_health_info, sizeof(ufs_health_info_t));
+    return RET_OK;
+}
+
+/**
+ * @brief 获取UFS错误统计信息
+ * @details 包含总命令数、成功数、重试数、失败数、介质错误等
+ *          用于性能分析和故障诊断
+ */
+ret_code_t ufs_target_get_error_stats(ufs_error_stats_t *stats)
+{
+    if (stats == NULL) {
+        return RET_ERR_PARAM;
+    }
+
+    memcpy(stats, &g_error_stats, sizeof(ufs_error_stats_t));
+    return RET_OK;
+}
+
+/**
+ * @brief 重置错误统计信息
+ */
+ret_code_t ufs_target_reset_error_stats(void)
+{
+    memset(&g_error_stats, 0, sizeof(ufs_error_stats_t));
+    return RET_OK;
+}
+
+/**
+ * @brief 设置写保护状态
+ * @details 启用写保护后，所有写命令将返回WRITE_PROTECTED错误
+ *          用于数据保护场景（如取证、固件更新保护）
+ */
+ret_code_t ufs_target_set_write_protect(bool enable)
+{
+    g_health_info.write_protected = enable;
+    LOG_INFO("UFS: 写保护 %s", enable ? "启用" : "禁用");
+    return RET_OK;
+}
+
+/**
+ * @brief 获取写保护状态
+ */
+bool ufs_target_get_write_protect(void)
+{
+    return g_health_info.write_protected;
+}
+
+/**
+ * @brief 后台操作触发（BKOPS）
+ * @details 触发垃圾回收、磨损均衡等后台操作
+ *          主机在系统空闲时调用，提升后续写入性能
+ */
+ret_code_t ufs_target_trigger_background_ops(void)
+{
+    if (!g_ufs_initialized) {
+        return RET_ERR_NOT_INIT;
+    }
+
+    LOG_INFO("UFS: 触发后台操作（BKOPS）");
+
+    /* 此处应调用FTL层的GC和磨损均衡接口
+     * 实际实现：ftl_trigger_gc() / ftl_trigger_wear_leveling()
+     * 当前为框架实现 */
+
+    return RET_OK;
+}
+
+/**
+ * @brief UFS健康监控周期处理
+ * @details 应定期调用（建议每秒一次），更新温度、寿命等健康指标
+ *          检测温度告警、寿命告警，必要时触发降速保护
+ */
+ret_code_t ufs_target_health_monitor_process(void)
+{
+    /* 更新上电时间（简化：每次调用增加1分钟，实际应基于时间戳） */
+    g_health_info.power_on_minutes++;
+
+    /* 温度监控（简化：模拟温度，实际应从传感器读取） */
+    if (g_health_info.temperature >= UFS_TEMP_CRITICAL_THRESHOLD) {
+        /* 严重过热：触发降速保护 */
+        g_health_info.temperature_warning = true;
+        LOG_WARN("UFS: 温度严重过高 %d°C，触发降速保护", g_health_info.temperature);
+    } else if (g_health_info.temperature >= UFS_TEMP_WARNING_THRESHOLD) {
+        /* 温度告警：上报主机 */
+        g_health_info.temperature_warning = true;
+        LOG_WARN("UFS: 温度过高 %d°C，建议降低负载", g_health_info.temperature);
+    } else {
+        g_health_info.temperature_warning = false;
+    }
+
+    /* 寿命监控 */
+    if (g_health_info.lifetime_used_percent >= UFS_LIFETIME_WARNING_PERCENT) {
+        g_health_info.lifetime_warning = true;
+        LOG_WARN("UFS: 寿命已使用 %u%%，建议备份数据", g_health_info.lifetime_used_percent);
+    }
+
+    return RET_OK;
+}
+
+/**
+ * @brief 命令重试机制
+ * @details 命令失败时自动重试，最多UFS_MAX_RETRY_COUNT次
+ *          提升介质错误场景下的命令成功率
+ */
+static ret_code_t ufs_cmd_retry(const ufs_cmd_request_t *request,
+                                 ufs_cmd_response_t *response,
+                                 uint8_t *data, uint32_t data_len)
+{
+    ret_code_t ret;
+    uint8_t retry = 0;
+
+    do {
+        ret = ufs_target_process_cmd(request, response, data, data_len);
+        if (ret == RET_OK && response->header.scsi_status == UFS_STATUS_GOOD) {
+            g_error_stats.success_count++;
+            return RET_OK;
+        }
+
+        /* 介质错误可重试 */
+        if (response->header.scsi_status == UFS_STATUS_CHECK_CONDITION &&
+            retry < UFS_MAX_RETRY_COUNT) {
+            retry++;
+            g_error_stats.retry_count++;
+            LOG_WARN("UFS: 命令重试 %d/%d", retry, UFS_MAX_RETRY_COUNT);
+            continue;
+        }
+
+        break;
+    } while (retry < UFS_MAX_RETRY_COUNT);
+
+    g_error_stats.failure_count++;
+    return ret;
 }

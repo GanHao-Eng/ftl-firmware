@@ -1,9 +1,10 @@
-/**
+﻿/**
  * @file os_linux.c
  * @brief Linux平台操作系统抽象层实现
  * @details 基于POSIX接口实现OS抽象层，用于模拟器和开发环境
  *          RTOS平台实现预留扩展（os_freertos.c等）
  */
+#define _DEFAULT_SOURCE
 #include "hal/os_abstract.h"
 #include <pthread.h>
 #include <time.h>

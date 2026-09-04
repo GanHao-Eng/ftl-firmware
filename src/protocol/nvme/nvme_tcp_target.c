@@ -125,10 +125,8 @@ static void close_connection(nvme_tcp_conn_t *conn)
         free(conn->recv_buffer);
         conn->recv_buffer = NULL;
     }
-    if (conn->data_buffer) {
-        free(conn->data_buffer);
-        conn->data_buffer = NULL;
-    }
+    /* data_buffer使用预分配缓冲区，不需要free */
+    conn->data_buffer = NULL;
 
     conn->state = NVME_TCP_CONN_CLOSED;
     conn->recv_len = 0;
@@ -541,12 +539,13 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
         transfer_len = nr * 16;
         LOG_INFO("NVMe/TCP: Dataset Mgmt NR=%u len=%u", nr, transfer_len);
 
-        if (conn->data_buffer) free(conn->data_buffer);
-        conn->data_buffer = (uint8_t *)calloc(1, transfer_len);
-        if (conn->data_buffer == NULL) {
+        /* 使用预分配缓冲区 */
+        if (transfer_len > NVME_TCP_MAX_IO_SIZE) {
             nvme_tcp_send_completion(conn, cid, sqid, 0x0006);
-            return RET_ERR_NO_SPACE;
+            return RET_ERR_PARAM;
         }
+        conn->data_buffer = g_io_write_buf;
+        memset(conn->data_buffer, 0, transfer_len);
         conn->data_len = 0;
         conn->data_total = transfer_len;
         conn->pending_cmd_id = cid;
@@ -574,7 +573,6 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
                 }
             }
             nvme_tcp_send_completion(conn, cid, sqid, ds);
-            free(conn->data_buffer);
             conn->data_buffer = NULL;
             conn->data_len = 0;
             conn->data_total = 0;
@@ -836,8 +834,7 @@ ret_code_t nvme_tcp_handle_h2cdata(nvme_tcp_conn_t *conn,
 
         nvme_tcp_send_capsule_resp(conn, &cpl);
 
-        /* 清理 */
-        free(conn->data_buffer);
+        /* 清理（使用预分配缓冲区，不需要free） */
         conn->data_buffer = NULL;
         conn->data_len = 0;
         conn->data_total = 0;

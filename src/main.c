@@ -337,7 +337,6 @@ static void task_ftl_unit_test(void *arg)
     (void)arg;
     uint8_t write_buf[4096];
     uint8_t read_buf[4096];
-    uint32_t i = 0;
     int pass = 1;
     ftl_stats_t stats;
 

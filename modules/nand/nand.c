@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nand.c
  * @brief NAND Flash 模拟模块实现
  * @details 通过文件模拟 NAND 物理介质，实现页读写、块擦除、坏块管理、磨损计数等功能
@@ -53,7 +53,11 @@ typedef struct {
 /**
  * @brief NAND 设备全局实例（私有）
  */
-static nand_dev_t g_nand_dev = {0};
+static nand_dev_t g_nand_dev = {
+    .media_fd = -1,
+    .mmap_base = NULL,
+    .mmap_size = 0,
+};
 
 /* ============================================================
  *  内部函数前置声明
@@ -129,30 +133,49 @@ ret_code_t nand_init(const char *file_path)
     /* 获取当前颗粒类型的参数 */
     init_bad_ratio = nand_get_init_bad_ratio(g_nand_dev.nand_type);
 
-    /* 打开模拟介质文件
-     * - 文件不存在：使用 "w+b" 全新创建并格式化（模拟出厂空NAND）
-     * - 文件已存在：使用 "r+b" 保留已有数据（模拟掉电后重新上电）
-     * 这样掉电恢复测试中，NAND数据可以正确保留 */
-    g_nand_dev.media_file = fopen(file_path, "r+b");
-    if (g_nand_dev.media_file == NULL) {
-        /* 文件不存在，全新创建 */
-        g_nand_dev.media_file = fopen(file_path, "w+b");
-        if (g_nand_dev.media_file == NULL) {
-            return RET_ERR_INTERNAL;
-        }
-        g_nand_dev.is_new_media = true;
-    } else {
-        g_nand_dev.is_new_media = false;
-    }
-
-    /* 预分配完整介质空间，模拟真实NAND容量（包含数据区和OOB区） */
-    total_size = (long)NAND_TOTAL_BLOCKS * NAND_PAGES_PER_BLOCK * (NAND_PAGE_SIZE + NAND_OOB_SIZE);
-    if (fseek(g_nand_dev.media_file, total_size - 1, SEEK_SET) != 0) {
-        fclose(g_nand_dev.media_file);
+    /* 打开模拟介质文件（使用文件描述符以便mmap映射）
+     * - 文件不存在：O_CREAT 全新创建
+     * - 文件已存在：保留已有数据 */
+    g_nand_dev.media_fd = open(file_path, O_RDWR | O_CREAT, 0644);
+    if (g_nand_dev.media_fd < 0) {
         return RET_ERR_INTERNAL;
     }
-    /* 写入一个字节以确保文件大小 */
-    (void)fputc(0, g_nand_dev.media_file);
+
+    /* 检查文件是否为全新创建 */
+    {
+        struct stat st;
+        if (fstat(g_nand_dev.media_fd, &st) == 0 && st.st_size == 0) {
+            g_nand_dev.is_new_media = true;
+        } else {
+            g_nand_dev.is_new_media = false;
+        }
+    }
+
+    /* 同时打开 FILE* 句柄，保留用于兼容性 */
+    g_nand_dev.media_file = fdopen(g_nand_dev.media_fd, "r+b");
+    if (g_nand_dev.media_file == NULL) {
+        close(g_nand_dev.media_fd);
+        return RET_ERR_INTERNAL;
+    }
+
+    /* 预分配完整介质空间 */
+    total_size = (long)NAND_TOTAL_BLOCKS * NAND_PAGES_PER_BLOCK * (NAND_PAGE_SIZE + NAND_OOB_SIZE);
+    if (ftruncate(g_nand_dev.media_fd, total_size) != 0) {
+        fclose(g_nand_dev.media_file);
+        close(g_nand_dev.media_fd);
+        return RET_ERR_INTERNAL;
+    }
+    g_nand_dev.mmap_size = (size_t)total_size;
+
+    /* mmap 映射文件到内存 */
+    g_nand_dev.mmap_base = (uint8_t *)mmap(NULL, g_nand_dev.mmap_size,
+                                              PROT_READ | PROT_WRITE, MAP_SHARED,
+                                              g_nand_dev.media_fd, 0);
+    if (g_nand_dev.mmap_base == MAP_FAILED) {
+        fclose(g_nand_dev.media_file);
+        close(g_nand_dev.media_fd);
+        return RET_ERR_INTERNAL;
+    }
     rewind(g_nand_dev.media_file);
 
     /* 初始化所有块的元数据 */
@@ -200,10 +223,7 @@ ret_code_t nand_init(const char *file_path)
                 continue;  /* 坏块跳过 */
             }
             for (uint32_t pg = 0; pg < NAND_PAGES_PER_BLOCK; pg++) {
-                oob_offset = nand_calc_oob_offset(blk, pg);
-                (void)fseek(g_nand_dev.media_file, oob_offset, SEEK_SET);
-                if (fread(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file) == 1) {
-                    if (oob.magic == NAND_OOB_MAGIC) {
+                oob_offset = nand_calc_oob_offset(blk, pg);`n                /* 直接从mmap内存读取OOB */`n                (void)memcpy(&oob, g_nand_dev.mmap_base + oob_offset, sizeof(nand_oob_t));`n                if (oob.magic == NAND_OOB_MAGIC) {
                         /* OOB魔数正确，说明该页已写入数据 */
                         g_phy_blocks[blk].page_valid[pg] = 1U;
                         g_phy_blocks[blk].valid_page_cnt++;
@@ -227,11 +247,21 @@ ret_code_t nand_init(const char *file_path)
  */
 void nand_deinit(void)
 {
-    /* 关闭介质文件前flush所有缓冲数据，确保持久化 */
+    /* mmap映射内存同步到文件，确保所有修改持久化 */
+    if (g_nand_dev.mmap_base != NULL) {
+        (void)msync(g_nand_dev.mmap_base, g_nand_dev.mmap_size, MS_SYNC);
+        (void)munmap(g_nand_dev.mmap_base, g_nand_dev.mmap_size);
+        g_nand_dev.mmap_base = NULL;
+    }
+
+    /* 关闭介质文件 */
     if (g_nand_dev.media_file != NULL) {
-        (void)fflush(g_nand_dev.media_file);
         (void)fclose(g_nand_dev.media_file);
         g_nand_dev.media_file = NULL;
+    }
+    if (g_nand_dev.media_fd >= 0) {
+        (void)close(g_nand_dev.media_fd);
+        g_nand_dev.media_fd = -1;
     }
 
     /* 清除初始化标志 */
@@ -269,19 +299,13 @@ ret_code_t nand_page_read(uint32_t block, uint32_t page, uint8_t *buf)
         return RET_ERR_NOT_MAPPED;
     }
 
-    /* 定位到指定页的偏移位置 */
-    offset = nand_calc_page_offset(block, page);
-    (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-
-    /* 读取一页数据 */
-    (void)fread(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
+    /* 定位到指定页的偏移位置（mmap内存直接寻址） */`n    offset = nand_calc_page_offset(block, page);`n`n    /* 从mmap映射内存读取一页数据（直接内存拷贝） */`n    (void)memcpy(buf, g_nand_dev.mmap_base + offset, NAND_PAGE_SIZE);
 
     /* 读取OOB中的ECC校验值并进行纠错 */
     {
         nand_oob_t oob;
         ecc_result_t ecc_ret;
-        (void)fseek(g_nand_dev.media_file, offset + NAND_PAGE_SIZE, SEEK_SET);
-        if (fread(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file) == 1) {
+        (void)memcpy(&oob, g_nand_dev.mmap_base + offset + NAND_PAGE_SIZE, sizeof(nand_oob_t));`n        if (oob.magic == NAND_OOB_MAGIC) {
             if (oob.magic == NAND_OOB_MAGIC) {
                 /* OOB有效，进行ECC校验和纠错 */
                 ecc_ret = nand_ecc_hamming_decode(buf, NAND_PAGE_SIZE, oob.ecc);
@@ -351,12 +375,7 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
         return RET_ERR_OVERWRITE;
     }
 
-    /* 定位到指定页的偏移位置 */
-    offset = nand_calc_page_offset(block, page);
-    (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-
-    /* 写入一页数据 */
-    (void)fwrite(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
+    /* 定位到指定页的偏移位置（mmap内存直接寻址） */`n    offset = nand_calc_page_offset(block, page);`n`n    /* 写入一页数据到mmap映射内存（直接内存拷贝） */`n    (void)memcpy(g_nand_dev.mmap_base + offset, buf, NAND_PAGE_SIZE);
 
     /* 写入 OOB 区域（标记页已写入，用于掉电恢复时重建页状态） */
     {
@@ -370,8 +389,7 @@ ret_code_t nand_page_write(uint32_t block, uint32_t page, const uint8_t *buf)
         (void)nand_ecc_hamming_encode(buf, NAND_PAGE_SIZE, &ecc_value);
         oob.ecc = ecc_value;
 
-        (void)fseek(g_nand_dev.media_file, offset + NAND_PAGE_SIZE, SEEK_SET);
-        (void)fwrite(&oob, sizeof(nand_oob_t), 1, g_nand_dev.media_file);
+        /* 直接写入mmap映射内存的OOB区域 */`n        (void)memcpy(g_nand_dev.mmap_base + offset + NAND_PAGE_SIZE, &oob, sizeof(nand_oob_t));
     }
 
     /* 注意：模拟器场景下不每次写入都fflush，由操作系统缓冲区管理
@@ -596,11 +614,7 @@ ret_code_t nand_mark_block_bad(uint32_t block, bad_block_type_t type)
         oob.magic = NAND_OOB_MAGIC;
         oob.bad_block_mark = 0x00;  /* 0x00 表示坏块 */
 
-        /* 定位到第一页的 OOB 区域 */
-        offset = nand_calc_oob_offset(block, 0);
-        (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-        (void)fwrite(&oob, 1U, sizeof(nand_oob_t), g_nand_dev.media_file);
-        (void)fflush(g_nand_dev.media_file);
+        /* 定位到第一页的OOB区域（mmap内存直接写入） */`n        offset = nand_calc_oob_offset(block, 0);`n        (void)memcpy(g_nand_dev.mmap_base + offset, &oob, sizeof(nand_oob_t));
     }
 
     LOG_WARN("标记块为坏块: 块=%u, 类型=%s, 擦写次数=%u",
@@ -896,12 +910,7 @@ uint32_t nand_inject_retention_errors(uint32_t block, uint32_t error_rate)
             continue;
         }
 
-        /* 读取该页数据 */
-        offset = nand_calc_page_offset(block, page);
-        (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-        if (fread(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file) != NAND_PAGE_SIZE) {
-            continue;
-        }
+        /* 从mmap内存读取该页数据 */`n        offset = nand_calc_page_offset(block, page);`n        (void)memcpy(buf, g_nand_dev.mmap_base + offset, NAND_PAGE_SIZE);
 
         /* 根据错误率随机翻转位 */
         total_bits = NAND_PAGE_SIZE * 8U;
@@ -919,12 +928,7 @@ uint32_t nand_inject_retention_errors(uint32_t block, uint32_t error_rate)
             error_count++;
         }
 
-        /* 写回错误数据（不更新OOB的ECC，模拟自然发生的位翻转） */
-        (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-        (void)fwrite(buf, 1U, NAND_PAGE_SIZE, g_nand_dev.media_file);
-    }
-
-    (void)fflush(g_nand_dev.media_file);
+        /* 写回错误数据到mmap内存（不更新OOB的ECC） */`n        (void)memcpy(g_nand_dev.mmap_base + offset, buf, NAND_PAGE_SIZE);`n    }
     pthread_mutex_unlock(&g_nand_mutex);
 
     LOG_INFO("NAND 数据保留: 块%u注入%u位错误(错误率%u)", block, error_count, error_rate);
@@ -2177,12 +2181,7 @@ ret_code_t nand_oob_read(uint32_t block, uint32_t page, nand_oob_t *oob)
         return RET_ERR_BAD_BLOCK;
     }
 
-    /* 定位到 OOB 区域的偏移位置 */
-    offset = nand_calc_oob_offset(block, page);
-    (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-
-    /* 读取 OOB 数据 */
-    (void)fread(oob, 1U, sizeof(nand_oob_t), g_nand_dev.media_file);
+    /* 从mmap内存读取OOB数据 */`n    offset = nand_calc_oob_offset(block, page);`n    (void)memcpy(oob, g_nand_dev.mmap_base + offset, sizeof(nand_oob_t));
 
     return RET_OK;
 }
@@ -2210,13 +2209,7 @@ ret_code_t nand_oob_write(uint32_t block, uint32_t page, const nand_oob_t *oob)
         return RET_ERR_BAD_BLOCK;
     }
 
-    /* 定位到 OOB 区域的偏移位置 */
-    offset = nand_calc_oob_offset(block, page);
-    (void)fseek(g_nand_dev.media_file, offset, SEEK_SET);
-
-    /* 写入 OOB 数据 */
-    (void)fwrite(oob, 1U, sizeof(nand_oob_t), g_nand_dev.media_file);
-    (void)fflush(g_nand_dev.media_file);
+    /* 写入OOB数据到mmap内存 */`n    offset = nand_calc_oob_offset(block, page);`n    (void)memcpy(g_nand_dev.mmap_base + offset, oob, sizeof(nand_oob_t));
 
     return RET_OK;
 }

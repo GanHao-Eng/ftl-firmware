@@ -31,7 +31,7 @@
  * ============================================================ */
 
 /** @brief FTL 元数据快照文件路径（掉电保护持久化） */
-#define FTL_SNAPSHOT_FILE  "ftl_snapshot.bin"
+#define FTL_SNAPSHOT_FILE  "/tmp/ftl_snapshot.bin"
 
 
 
@@ -539,7 +539,7 @@ static ret_code_t init_all_modules(void)
 
     /* 初始化 NAND 模块 */
     printf("[固件] 初始化 NAND 模块...\n");
-    ret = nand_init("nand_disk.bin");
+    ret = nand_init("/tmp/nand_disk.bin");
     if (ret != RET_OK) {
         printf("[固件] NAND 模块初始化失败\n");
         return RET_ERR_INTERNAL;

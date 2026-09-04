@@ -55,7 +55,7 @@ extern "C" {
 #define FTL_WAL_MAX_ENTRIES         1024U
 
 /** @brief WAL日志默认文件路径 */
-#define FTL_WAL_DEFAULT_FILE        "ftl_wal.log"
+#define FTL_WAL_DEFAULT_FILE        "/tmp/ftl_wal.log"
 
 /** @brief WAL是否默认启用 */
 #define FTL_WAL_ENABLED_DEFAULT     true

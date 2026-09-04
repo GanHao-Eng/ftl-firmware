@@ -44,8 +44,9 @@ static ufs_health_info_t g_health_info = {
 /* 错误统计信息 */
 static ufs_error_stats_t g_error_stats = {0};
 
-/* 命令队列 */
-static ufs_cmd_queue_entry_t g_cmd_queue[UFS_MAX_CMD_QUEUE];
+/* 命令队列（预留接口，用于多队列并发场景）
+ * 当前单线程同步处理模式下未使用，保留用于未来多队列扩展 */
+static ufs_cmd_queue_entry_t g_cmd_queue[UFS_MAX_CMD_QUEUE] __attribute__((unused));
 
 /* UFS设备标识信息 */
 static const ufs_inquiry_data_t g_ufs_inquiry = {
@@ -519,13 +520,19 @@ ret_code_t ufs_target_health_monitor_process(void)
 }
 
 /**
- * @brief 命令重试机制
+ * @brief 带重试的命令处理（对外接口）
  * @details 命令失败时自动重试，最多UFS_MAX_RETRY_COUNT次
  *          提升介质错误场景下的命令成功率
+ * @param[in]  request  命令请求
+ * @param[out] response 命令响应
+ * @param[in,out] data  数据缓冲区
+ * @param[in]  data_len 数据缓冲区长度
+ * @retval RET_OK 处理成功
+ * @retval RET_ERR_PARAM 参数非法
  */
-static ret_code_t ufs_cmd_retry(const ufs_cmd_request_t *request,
-                                 ufs_cmd_response_t *response,
-                                 uint8_t *data, uint32_t data_len)
+ret_code_t ufs_target_process_cmd_with_retry(const ufs_cmd_request_t *request,
+                                              ufs_cmd_response_t *response,
+                                              uint8_t *data, uint32_t data_len)
 {
     ret_code_t ret;
     uint8_t retry = 0;

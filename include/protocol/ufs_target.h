@@ -223,6 +223,19 @@ ret_code_t ufs_target_process_cmd(const ufs_cmd_request_t *request,
                                    uint8_t *data, uint32_t data_len);
 
 /**
+ * @brief 带重试的命令处理
+ * @details 命令失败时自动重试，最多UFS_MAX_RETRY_COUNT次
+ * @param[in]  request  命令请求
+ * @param[out] response 命令响应
+ * @param[in,out] data  数据缓冲区
+ * @param[in]  data_len 数据缓冲区长度
+ * @retval RET_OK 处理成功
+ */
+ret_code_t ufs_target_process_cmd_with_retry(const ufs_cmd_request_t *request,
+                                              ufs_cmd_response_t *response,
+                                              uint8_t *data, uint32_t data_len);
+
+/**
  * @brief 获取UFS设备容量
  * @param[out] total_sectors 总扇区数
  * @param[out] sector_size   扇区大小（字节）

@@ -273,13 +273,14 @@ static void task_nvme_tcp_service(void *arg)
     (void)arg;
     printf("[任务] NVMe-TCP-Service 启动 (优先级=HIGH)\n");
 
-    /* 持续处理 NVMe/TCP 主机命令，直到程序退出 */
+    /* 持续处理 NVMe/TCP 主机命令，直到程序退出
+     * 采用忙轮询模式（Busy Polling），与真实 SSD 固件前端处理器一致：
+     * 真实 SSD 固件的 NVMe 前端控制器持续轮询提交队列，不会主动休眠，
+     * 以确保最低延迟和最高 IOPS。多线程环境下，OS 调度器会自动
+     * 在该任务和其他低优先级任务之间切换 CPU 时间。 */
     while (1) {
         /* 处理一次 NVMe/TCP 协议栈事件（非阻塞，无事件时立即返回） */
         nvme_tcp_target_process();
-
-        /* 短暂休眠，避免 CPU 100% 占用，同时降低延迟 */
-        os_delay_ms(1);
     }
 }
 

@@ -257,6 +257,242 @@ static int __attribute__((unused)) firmware_main_loop(void)
 /* 全局日志级别（默认 WARN，高性能模式） */
 static log_level_t g_log_level = LOG_LEVEL_WARN;
 
+/* ============================================================
+ *  任务函数实现（FreeRTOS 风格任务入口）
+ *  每个任务独立线程，通过消息队列通信，避免共享数据竞争
+ * ============================================================ */
+
+/**
+ * @brief NVMe/TCP 前端接口服务任务（高优先级，核心业务）
+ * @param[in] arg 任务参数（未使用）
+ * @details 持续调用 nvme_tcp_target_process 处理主机命令，
+ *          这是固件的核心业务任务，优先级最高
+ */
+static void task_nvme_tcp_service(void *arg)
+{
+    (void)arg;
+    printf("[任务] NVMe-TCP-Service 启动 (优先级=HIGH)\n");
+
+    /* 持续处理 NVMe/TCP 主机命令，直到程序退出 */
+    while (1) {
+        /* 处理一次 NVMe/TCP 协议栈事件（非阻塞，无事件时立即返回） */
+        nvme_tcp_target_process();
+
+        /* 短暂休眠，避免 CPU 100% 占用，同时降低延迟 */
+        os_delay_ms(1);
+    }
+}
+
+/**
+ * @brief 心跳与健康监控任务（普通优先级，后台管理）
+ * @param[in] arg 任务参数（未使用）
+ * @details 定期输出 FTL 统计信息（WAF、GC次数、已使用页），
+ *          每10秒保存一次 PLP 快照（掉电保护），每5秒输出一次心跳
+ */
+static void task_heartbeat_monitor(void *arg)
+{
+    (void)arg;
+    uint32_t tick = 0;
+    ftl_stats_t stats;
+
+    printf("[任务] Heartbeat-Monitor 启动 (优先级=NORMAL)\n");
+
+    while (1) {
+        tick++;
+
+        /* 每5秒输出一次 FTL 统计信息 */
+        if (tick % 5 == 0) {
+            if (ftl_get_stats(&stats) == RET_OK) {
+                printf("[心跳] FTL统计: 已用页=%u/%u, GC次数=%u, WAF=%.2f, 主机写=%u, NAND写=%u\n",
+                       stats.used_lpns, stats.total_lpns,
+                       stats.gc_count, stats.waf,
+                       stats.host_write_pages, stats.nand_write_pages);
+            }
+        }
+
+        /* 每10秒保存一次 PLP 快照（掉电保护持久化） */
+        if (tick % 10 == 0) {
+            ret_code_t ret = ftl_save_snapshot(FTL_SNAPSHOT_FILE);
+            if (ret != RET_OK) {
+                printf("[心跳] 警告: PLP快照保存失败 (ret=%d)\n", ret);
+            }
+        }
+
+        /* 休眠1秒 */
+        os_delay_ms(1000);
+    }
+}
+
+/**
+ * @brief FTL 单元测试任务（低优先级，后台验证）
+ * @param[in] arg 任务参数（未使用）
+ * @details 从 tests/test_ftl_unit.c 提取核心测试项，
+ *          在后台低优先级运行，验证 FTL 层功能正确性：
+ *          1. 初始化状态检查
+ *          2. 单页读写一致性
+ *          3. 覆盖写验证（新数据覆盖旧数据）
+ */
+static void task_ftl_unit_test(void *arg)
+{
+    (void)arg;
+    uint8_t write_buf[4096];
+    uint8_t read_buf[4096];
+    uint32_t i = 0;
+    int pass = 1;
+    ftl_stats_t stats;
+
+    printf("[任务] FTL-Unit-Test 启动 (优先级=LOW)\n");
+
+    /* ---------- 测试1: 初始化状态检查 ---------- */
+    printf("[FTL测试] 1. 初始化状态检查\n");
+    if (ftl_get_stats(&stats) != RET_OK) {
+        printf("  [FAIL] ftl_get_stats 失败\n");
+        pass = 0;
+    } else if (stats.total_lpns == 0) {
+        printf("  [FAIL] 总逻辑页数为0\n");
+        pass = 0;
+    } else {
+        printf("  [PASS] 初始化正常: 总LPN=%u\n", stats.total_lpns);
+    }
+
+    /* ---------- 测试2: 单页读写一致性 ---------- */
+    printf("[FTL测试] 2. 单页读写一致性\n");
+    /* 填充测试数据：0xA5 模式 */
+    memset(write_buf, 0xA5, sizeof(write_buf));
+    memset(read_buf, 0x00, sizeof(read_buf));
+
+    if (ftl_write(100, write_buf) != RET_OK) {
+        printf("  [FAIL] 写入 LPN=100 失败\n");
+        pass = 0;
+    } else if (ftl_read(100, read_buf) != RET_OK) {
+        printf("  [FAIL] 读取 LPN=100 失败\n");
+        pass = 0;
+    } else if (memcmp(write_buf, read_buf, sizeof(write_buf)) != 0) {
+        printf("  [FAIL] 读写数据不一致\n");
+        pass = 0;
+    } else {
+        printf("  [PASS] 单页读写一致 (LPN=100)\n");
+    }
+
+    /* ---------- 测试3: 覆盖写验证 ---------- */
+    printf("[FTL测试] 3. 覆盖写验证\n");
+    /* 用新数据 0x55 覆盖旧数据 0xA5 */
+    memset(write_buf, 0x55, sizeof(write_buf));
+    memset(read_buf, 0x00, sizeof(read_buf));
+
+    if (ftl_write(100, write_buf) != RET_OK) {
+        printf("  [FAIL] 覆盖写入 LPN=100 失败\n");
+        pass = 0;
+    } else if (ftl_read(100, read_buf) != RET_OK) {
+        printf("  [FAIL] 覆盖后读取 LPN=100 失败\n");
+        pass = 0;
+    } else if (read_buf[0] != 0x55) {
+        printf("  [FAIL] 覆盖后读取到旧数据 (expected 0x55, got 0x%02X)\n", read_buf[0]);
+        pass = 0;
+    } else {
+        printf("  [PASS] 覆盖写验证通过 (新数据=0x55)\n");
+    }
+
+    /* 输出测试结果 */
+    printf("[FTL测试] 结果: %s\n\n", pass ? "全部通过" : "存在失败");
+
+    /* 测试任务完成后进入空闲循环（不退出线程） */
+    while (1) {
+        os_delay_ms(60000);  /* 每60秒唤醒一次，保持线程存活 */
+    }
+}
+
+/**
+ * @brief GC 算法基准测试任务（低优先级，后台性能分析）
+ * @param[in] arg 任务参数（未使用）
+ * @details 从 tests/test_gc_benchmark.c 提取核心逻辑，
+ *          在后台低优先级运行，测试 GC 算法性能：
+ *          1. 顺序写入100页填充数据
+ *          2. 触发一次 GC
+ *          3. 统计 GC 次数和已使用页变化
+ */
+static void task_gc_benchmark(void *arg)
+{
+    (void)arg;
+    uint8_t write_buf[4096];
+    uint32_t i = 0;
+    uint32_t gc_before = 0;
+    uint32_t gc_after = 0;
+    ftl_stats_t stats;
+
+    printf("[任务] GC-Benchmark 启动 (优先级=LOW)\n");
+
+    /* 填充测试数据 */
+    memset(write_buf, 0xCC, sizeof(write_buf));
+
+    /* ---------- 阶段1: 顺序写入100页 ---------- */
+    printf("[GC测试] 阶段1: 顺序写入 100 页...\n");
+    for (i = 0; i < 100; i++) {
+        if (ftl_write(i, write_buf) != RET_OK) {
+            printf("  [WARN] 写入 LPN=%u 失败\n", i);
+        }
+    }
+    printf("  完成: 写入 100 页\n");
+
+    /* 记录 GC 前的统计 */
+    if (ftl_get_stats(&stats) == RET_OK) {
+        gc_before = stats.gc_count;
+        printf("  GC前: GC次数=%u, 已用页=%u\n", stats.gc_count, stats.used_lpns);
+    }
+
+    /* ---------- 阶段2: 触发 GC ---------- */
+    printf("[GC测试] 阶段2: 触发 GC...\n");
+    ret_code_t ret = ftl_trigger_gc();
+    if (ret == RET_OK) {
+        printf("  GC 触发成功\n");
+    } else {
+        printf("  GC 触发返回: ret=%d (可能无需GC)\n", ret);
+    }
+
+    /* 记录 GC 后的统计 */
+    if (ftl_get_stats(&stats) == RET_OK) {
+        gc_after = stats.gc_count;
+        printf("  GC后: GC次数=%u, 已用页=%u, 搬迁页数=%u\n",
+               stats.gc_count, stats.used_lpns, stats.gc_moved_pages);
+    }
+
+    /* 输出基准测试结果 */
+    printf("[GC测试] 结果: GC执行次数=%u, 搬迁页数=%u\n\n",
+           gc_after - gc_before,
+           (ftl_get_stats(&stats) == RET_OK) ? stats.gc_moved_pages : 0);
+
+    /* 测试任务完成后进入空闲循环 */
+    while (1) {
+        os_delay_ms(60000);
+    }
+}
+
+/**
+ * @brief 任务状态监控任务（空闲优先级，调试用）
+ * @param[in] arg 任务参数（未使用）
+ * @details 每30秒打印一次所有任务的状态表，
+ *          包括任务名、优先级、状态、运行次数，
+ *          用于调试和监控系统运行状态
+ */
+static void task_status_monitor(void *arg)
+{
+    (void)arg;
+    uint32_t tick = 0;
+
+    printf("[任务] Task-Monitor 启动 (优先级=IDLE)\n");
+
+    while (1) {
+        tick++;
+
+        /* 每30秒打印一次任务状态表 */
+        if (tick % 30 == 0) {
+            task_print_status();
+        }
+
+        os_delay_ms(1000);
+    }
+}
+
 /**
  * @brief 初始化所有模块
  * @retval RET_OK 成功

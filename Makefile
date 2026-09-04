@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  FTL 固件 Makefile
 # ============================================================
 
@@ -92,6 +92,8 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/$(UTILS_DIR)
 	@mkdir -p $(BUILD_DIR)/$(TEST_DIR)
 	@mkdir -p $(BUILD_DIR)/$(SRC_DIR)/protocol/nvme
+	@mkdir -p $(BUILD_DIR)/$(SRC_DIR)/protocol/ufs
+	@mkdir -p $(BUILD_DIR)/$(SRC_DIR)/hal
 
 # 编译目标文件
 $(BUILD_DIR)/%.o: %.c

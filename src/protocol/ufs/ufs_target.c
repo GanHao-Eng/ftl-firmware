@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file ufs_target.c
  * @brief UFS（Universal Flash Storage）目标端简化实现
  * @details 实现UFS基本命令集框架，展示UFS协议架构理解
@@ -11,8 +11,8 @@
  *       - 两者FTL层算法通用，仅前端协议不同
  */
 #include "protocol/ufs_target.h"
-#include "ftl/ftl.h"
-#include "log/log.h"
+#include "ftl.h"
+#include "log.h"
 #include <string.h>
 
 /* ============================================================

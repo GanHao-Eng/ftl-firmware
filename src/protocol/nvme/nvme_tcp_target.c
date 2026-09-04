@@ -50,6 +50,12 @@ static nvme_tcp_conn_t g_connections[NVME_TCP_MAX_CONNECTIONS];
 static int g_listen_fd = -1;
 static bool g_running = false;
 
+/* 预分配的I/O缓冲区，避免频繁malloc/free */
+#define NVME_TCP_MAX_IO_SIZE  (1024 * 1024)  /* 最大1MB */
+static uint8_t g_io_read_buf[NVME_TCP_MAX_IO_SIZE];
+static uint8_t g_io_write_buf[NVME_TCP_MAX_IO_SIZE];
+static uint8_t g_zero_buf[4096];  /* 静态零缓冲区，用于Write Zeroes */
+
 /* 默认子系统 NQN */
 static const char *DEFAULT_SUBNQN = "nqn.2026-08.io.ftlfw:subsystem";
 
@@ -482,22 +488,20 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
     const nvme_command_t *cmd = &cmd_copy;
     cid = le16_to_cpu(cmd->cid);
 
-    LOG_INFO("NVMe/TCP: CapsuleCmd opcode=0x%02X cid=%u sqid=%u data_len=%u",
-             cmd->opcode, cid, sqid, data_len);
+    /* I/O路径不输出INFO日志，只在错误时输出 */
 
-    /* 1. Write: 分配缓冲区，发送 R2T */
+    /* 1. Write: 使用预分配缓冲区，发送 R2T */
     if (cmd->opcode == NVME_IO_WRITE) {
         nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
         transfer_len = nlb * 4096;
-        LOG_INFO("NVMe/TCP: Write SLBA=%llu NLB=%u len=%u",
-                 (unsigned long long)slba, nlb, transfer_len);
 
-        if (conn->data_buffer) free(conn->data_buffer);
-        conn->data_buffer = (uint8_t *)malloc(transfer_len);
-        if (conn->data_buffer == NULL) {
+        if (transfer_len > NVME_TCP_MAX_IO_SIZE) {
             nvme_tcp_send_completion(conn, cid, sqid, 0x0006);
-            return RET_ERR_NO_SPACE;
+            return RET_ERR_PARAM;
         }
+
+        conn->data_buffer = g_io_write_buf;  /* 使用预分配缓冲区 */
+        conn->data_len = 0;
         conn->data_len = 0;
         conn->data_total = transfer_len;
         conn->pending_cmd_id = cid;
@@ -524,7 +528,6 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
                 }
             }
             nvme_tcp_send_completion(conn, cid, sqid, ws);
-            free(conn->data_buffer);
             conn->data_buffer = NULL;
             conn->data_len = 0;
             conn->data_total = 0;
@@ -702,33 +705,31 @@ ret_code_t nvme_tcp_handle_capsule_cmd(nvme_tcp_conn_t *conn,
         cpl.status = cpu_to_le16(0x0000);
     }
 
-    /* 7. Write Zeroes */
+    /* 7. Write Zeroes: 使用静态零缓冲区 */
     if (cmd->opcode == NVME_IO_WRITE_ZEROES && sqid != 0) {
         nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
-        uint8_t zero_buf[4096];
         uint16_t wz = 0x0000;
-        memset(zero_buf, 0, sizeof(zero_buf));
         for (uint32_t i = 0; i < nlb; i++) {
-            if (ftl_write((uint32_t)(slba + i), zero_buf) != RET_OK) {
+            if (ftl_write((uint32_t)(slba + i), g_zero_buf) != RET_OK) {
                 wz = 0x0006; break;
             }
         }
         cpl.status = cpu_to_le16(wz);
     }
 
-    /* 8. Read */
+    /* 8. Read: 使用预分配缓冲区 */
     if (cmd->opcode == NVME_IO_READ) {
         nvme_tcp_parse_slba_nlb(cmd, &slba, &nlb);
         transfer_len = nlb * 4096;
-        uint8_t *read_data = (uint8_t *)calloc(1, transfer_len);
-        if (read_data != NULL) {
+
+        if (transfer_len <= NVME_TCP_MAX_IO_SIZE) {
+            uint8_t *read_data = g_io_read_buf;
             for (uint32_t i = 0; i < nlb; i++) {
                 if (ftl_read((uint32_t)(slba + i), read_data + i * 4096) != RET_OK) {
                     memset(read_data + i * 4096, 0, 4096);
                 }
             }
             nvme_tcp_send_c2hdata_chunks(conn, cid, read_data, transfer_len);
-            free(read_data);
         } else {
             cpl.status = cpu_to_le16(0x0006);
         }

@@ -11,6 +11,8 @@
 #include <string.h>
 #include "protocol/ufs_target.h"
 #include "common/common.h"
+#include "nand.h"
+#include "ftl.h"
 
 /* ============================================================
  *  简单测试框架
@@ -100,6 +102,13 @@ static void test_ufs_init(void)
     uint32_t sector_size = 0;
 
     printf("\n=== test_ufs_init ===\n");
+
+    /* UFS依赖NAND和FTL层，必须先初始化 */
+    ret = nand_init("/tmp/test_ufs_nand.bin");
+    TEST_ASSERT_EQ(ret, RET_OK, "nand_init 返回 RET_OK");
+
+    ret = ftl_init();
+    TEST_ASSERT_EQ(ret, RET_OK, "ftl_init 返回 RET_OK");
 
     ret = ufs_target_init();
     TEST_ASSERT_EQ(ret, RET_OK, "ufs_target_init 返回 RET_OK");
@@ -337,7 +346,7 @@ static void test_health_monitor(void)
     TEST_ASSERT_EQ(ret, RET_OK, "获取健康信息成功");
     TEST_ASSERT(health.temperature >= -40 && health.temperature <= 125, "温度在合理范围");
     TEST_ASSERT(health.lifetime_used_percent <= 100, "寿命百分比<=100");
-    TEST_ASSERT(health.power_on_count >= 0, "上电次数>=0");
+    TEST_ASSERT(health.power_on_count <= 0xFFFFFFFF, "上电次数在合理范围");
 
     printf("  [INFO] 温度: %d°C, 寿命已用: %u%%, 上电次数: %u\n",
            health.temperature, health.lifetime_used_percent, health.power_on_count);
@@ -359,9 +368,9 @@ static void test_error_stats(void)
 
     ret = ufs_target_get_error_stats(&stats);
     TEST_ASSERT_EQ(ret, RET_OK, "获取错误统计成功");
-    TEST_ASSERT(stats.total_cmd_count >= 0, "总命令数>=0");
-    TEST_ASSERT(stats.success_count >= 0, "成功数>=0");
-    TEST_ASSERT(stats.retry_count >= 0, "重试次数>=0");
+    TEST_ASSERT(stats.total_cmd_count <= 0xFFFFFFFF, "总命令数在合理范围");
+    TEST_ASSERT(stats.success_count <= stats.total_cmd_count, "成功数<=总命令数");
+    TEST_ASSERT(stats.retry_count <= 0xFFFFFFFF, "重试次数在合理范围");
 
     printf("  [INFO] 总命令: %u, 成功: %u, 重试: %u, 失败: %u\n",
            stats.total_cmd_count, stats.success_count,
@@ -414,6 +423,8 @@ int main(void)
 
     /* 反初始化 */
     ufs_target_deinit();
+    ftl_deinit();
+    nand_deinit();
 
     /* 打印测试结果 */
     printf("\n========================================\n");

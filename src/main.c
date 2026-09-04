@@ -280,15 +280,10 @@ static void task_nvme_tcp_service(void *arg)
      * 以确保最低延迟和最高 IOPS。多线程环境下，OS 调度器会自动
      * 在该任务和其他低优先级任务之间切换 CPU 时间。 */
     while (1) {
-        /* 处理一次 NVMe/TCP 协议栈事件（非阻塞，无事件时立即返回） */
+        /* 处理一次 NVMe/TCP 协议栈事件（非阻塞，无事件时立即返回）
+         * 纯忙轮询模式：不主动让出CPU，确保最低延迟和最高IOPS
+         * 与真实SSD固件NVMe前端控制器的工作方式一致 */
         nvme_tcp_target_process();
-
-        /* 主动让出CPU时间片，但不进入睡眠状态：
-         * - 比 os_delay_ms(1) 延迟低得多（<1us vs 1ms）
-         * - 比纯忙轮询更友好，允许内核软中断(ksoftirqd)处理网络数据包
-         * - 如果系统无其他就绪线程，调度器会立即重新调度本线程
-         * 这是 Linux 用户态 NVMe/TCP 目标端的标准优化方式 */
-        sched_yield();
     }
 }
 

@@ -39,7 +39,7 @@
  *  任务函数前向声明（FreeRTOS 风格任务入口）
  *  每个任务独立线程，通过消息队列通信，避免共享数据竞争
  * ============================================================ */
-static void task_nvme_tcp_service(void *arg);    ///< NVMe/TCP 前端接口服务任务（高优先级）
+static void __attribute__((unused)) task_nvme_tcp_service(void *arg);    ///< NVMe/TCP 前端接口服务任务（高优先级）
 static void task_heartbeat_monitor(void *arg);     ///< 心跳与健康监控任务（普通优先级）
 static void task_ftl_unit_test(void *arg);         ///< FTL 单元测试任务（低优先级，后台验证）
 static void task_gc_benchmark(void *arg);          ///< GC 算法基准测试任务（低优先级，后台分析）
@@ -1627,11 +1627,11 @@ int main(int argc, char *argv[])
      *  任务注册（FreeRTOS 风格，按优先级从高到低）
      * ============================================================ */
     printf("\n[固件] 注册系统任务...\n");
-//    task_register("NVMe-TCP-Service", task_nvme_tcp_service, NULL, TASK_PRIORITY_HIGH, 64 * 1024);
-//    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
-//    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-//    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-//    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
+    /* NVMe/TCP核心业务在主线程运行（确保最低延迟），不注册为独立任务 */
+    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
+    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
 
     uint32_t started = task_start_all();
     if (started == 0) {

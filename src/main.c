@@ -1627,7 +1627,7 @@ int main(int argc, char *argv[])
      *  任务注册（FreeRTOS 风格，按优先级从高到低）
      * ============================================================ */
     printf("\n[固件] 注册系统任务...\n");
-    task_register("NVMe-TCP-Service", task_nvme_tcp_service, NULL, TASK_PRIORITY_HIGH, 64 * 1024);
+//    task_register("NVMe-TCP-Service", task_nvme_tcp_service, NULL, TASK_PRIORITY_HIGH, 64 * 1024);
 //    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
 //    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
 //    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
@@ -1641,14 +1641,38 @@ int main(int argc, char *argv[])
     }
     task_print_status();
 
-    printf("[固件] 进入多任务运行模式（Ctrl+C 退出）...\n\n");
+    printf("[固件] 进入多任务运行模式（NVMe/TCP核心业务在主线程，辅助任务在子线程）...\n\n");
     uint32_t main_loop_count = 0;
     while (1) {
+        /* 核心业务：NVMe/TCP 前端接口处理（在主线程运行，确保最低延迟） */
+        manager_process();
+        host_if_process();
+        nvme_tcp_target_process();
+
+        /* 更新模块心跳（防止看门狗超时） */
+        manager_send_heartbeat(MODULE_NAND);
+        manager_send_heartbeat(MODULE_FTL);
+        manager_send_heartbeat(MODULE_HOST_IF);
+        manager_send_heartbeat(MODULE_LOG);
+
         main_loop_count++;
-        os_delay_ms(1000);
-        if (main_loop_count % 60 == 0) {
+
+        /* 每10000次循环打印一次状态 */
+        if (main_loop_count % 10000U == 0U) {
             printf("[主线程] 运行中: 循环次数=%u, 任务数=%u\n", main_loop_count, g_task_count);
+            manager_print_module_status();
         }
+
+        /* 掉电保护：每5000次循环保存一次 FTL 元数据快照 */
+        if (main_loop_count % 5000U == 0U) {
+            ret_code_t snap_ret = ftl_save_snapshot(FTL_SNAPSHOT_FILE);
+            if (snap_ret != RET_OK) {
+                LOG_WARN("FTL 快照保存失败: ret=%d", snap_ret);
+            }
+        }
+
+        /* 短暂休眠100微秒，减少CPU占用 */
+        usleep(100);
     }
 
     deinit_all_modules();

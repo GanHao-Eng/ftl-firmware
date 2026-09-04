@@ -1669,8 +1669,9 @@ int main(int argc, char *argv[])
             }
         }
 
-        /* 短暂休眠100微秒，减少CPU占用 */
-        usleep(100);
+        /* 纯忙轮询：不主动休眠，确保最低延迟和最高IOPS
+         * 与真实SSD固件NVMe前端控制器的工作方式一致
+         * CPU占用会达到100%，但性能最优 */
     }
 
     deinit_all_modules();

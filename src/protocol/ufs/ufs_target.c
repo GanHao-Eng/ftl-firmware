@@ -228,6 +228,12 @@ static ret_code_t handle_write_10(const ufs_cmd_request_t *request,
     uint32_t lpn = lba / 8;
     uint32_t lpns = (bytes_to_write + 4095) / 4096;
 
+    /* 写保护检查：启用写保护时拒绝写入 */
+    if (g_health_info.write_protected) {
+        set_response_check_condition(response, 0x07, 0x27, 0x00);  /* WRITE PROTECTED */
+        return RET_OK;
+    }
+
     if (bytes_to_write > data_len) {
         set_response_check_condition(response, 0x05, 0x20, 0x00);
         return RET_ERR_PARAM;

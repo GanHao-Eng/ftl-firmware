@@ -1628,16 +1628,14 @@ int main(int argc, char *argv[])
      * ============================================================ */
     printf("\n[固件] 注册系统任务...\n");
 //    task_register("NVMe-TCP-Service", task_nvme_tcp_service, NULL, TASK_PRIORITY_HIGH, 64 * 1024);
-//    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
-//    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-//    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-//    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
+    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
+    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
 
     uint32_t started = task_start_all();
     if (started == 0) {
-        printf("[固件] 错误：没有任务成功启动\n");
-        deinit_all_modules();
-        return -1;
+        printf("[固件] 警告：没有辅助任务启动（核心业务在主线程运行）\n");
     }
     task_print_status();
 

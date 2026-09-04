@@ -515,3 +515,162 @@ if (cmd->opcode == NVME_IO_WRITE_ZEROES && sqid != 0) {
 | TRIM (DSM) | ✅ `nvme dsm` success |
 | fio 顺序读 | ✅ 6.7 MB/s |
 | fio 顺序写 | ✅ 5.8 MB/s |
+
+---
+
+## 12. fdopen/ftruncate 隐式声明导致段错误
+
+### 现象
+
+NAND层mmap优化后，固件启动时在"初始化NAND模块"处段错误：
+```
+[固件] 初始化 NAND 模块...
+段错误 (核心已转储)
+```
+
+### 根因
+
+C99标准中，未声明的函数默认返回 `int`（32位）。`fdopen` 实际返回 `FILE*`（64位指针），
+隐式声明导致返回值被截断为32位，指针无效，后续 `fseek`/`fread` 访问无效指针触发段错误。
+
+编译时有警告但被忽略：
+```
+warning: implicit declaration of function 'fdopen'
+warning: assignment to 'FILE *' from 'int' makes pointer from integer without a cast
+```
+
+### 解决方案
+
+在 `nand.c` 开头添加 `_DEFAULT_SOURCE` 宏，确保 POSIX 函数正确声明：
+```c
+#define _DEFAULT_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+// ...
+```
+
+> **经验教训**: 编译警告必须重视，特别是隐式函数声明，在64位系统上会导致指针截断。
+
+---
+
+## 13. VMware HGFS 共享目录不支持 mmap
+
+### 现象
+
+NAND持久化文件放在 `/mnt/hgfs/Code/ftl-firmware/nand_disk.bin`（VMware HGFS共享目录），
+mmap调用成功但访问映射内存时段错误。
+
+### 根因
+
+VMware HGFS（Host Guest File System）共享文件系统不支持 `mmap(MAP_SHARED)` 映射。
+虽然 `mmap()` 调用返回成功（不报错），但实际访问映射内存时会触发段错误。
+
+### 解决方案
+
+将NAND/FTL持久化文件改到本地 `/tmp` 目录：
+```c
+// main.c
+#define NAND_MEDIA_FILE  "/tmp/nand_disk.bin"
+#define FTL_SNAPSHOT_FILE "/tmp/ftl_snapshot.bin"
+
+// ftl.h
+#define FTL_WAL_LOG_FILE  "/tmp/ftl_wal.log"
+```
+
+> **经验教训**: mmap不仅要看调用返回值，还要实际访问测试。跨平台/网络文件系统通常不支持mmap。
+
+---
+
+## 14. build目录 file too short 链接错误
+
+### 现象
+
+编译时 `.o` 文件生成成功，但链接时报错：
+```
+/usr/bin/ld: error: build/modules/thread/thread.o: file too short
+collect2: error: ld returned 1 exit status
+```
+
+重试编译后错误位置随机变化（有时是log.o，有时是其他.o）。
+
+### 根因
+
+VMware HGFS共享目录的文件系统缓存问题：编译器写入 `.o` 文件后，链接器立即读取时，
+文件内容还未完全刷新到磁盘，导致读取到不完整的文件（file too short）。
+
+这是HGFS共享目录的已知问题，在频繁创建/写入小文件时尤其明显。
+
+### 解决方案
+
+**方案1（临时）**: 增加sleep等待缓存刷新
+```bash
+rm -rf build && sync && sleep 5 && make
+```
+
+**方案2（推荐，已实施）**: 编译输出目录改到本地 `/tmp` 文件系统
+```makefile
+# Makefile
+BUILD_DIR = /tmp/ftl-firmware-build
+```
+
+彻底解决HGFS缓存问题，编译速度也有提升（本地文件系统比共享目录快）。
+
+---
+
+## 15. free(): invalid pointer 崩溃
+
+### 现象
+
+NVMe/TCP协议栈优化（预分配缓冲区）后，固件运行一段时间后崩溃：
+```
+free(): invalid pointer
+已中止 (核心已转储)
+```
+
+### 根因
+
+写命令使用了预分配的 `g_io_write_buf`（非malloc分配），但 Dataset Management (TRIM) 等命令
+仍在使用 `calloc` 分配 `conn->data_buffer`，并在完成时 `free(conn->data_buffer)`。
+
+执行顺序：
+1. Write命令：`conn->data_buffer = g_io_write_buf`（预分配，不free）
+2. TRIM命令：`if (conn->data_buffer) free(conn->data_buffer)` → **free预分配内存** → 崩溃
+
+### 解决方案
+
+统一所有使用 `conn->data_buffer` 的命令都使用预分配缓冲区，移除全部 `malloc/calloc/free` 调用：
+- Write命令：使用 `g_io_write_buf`
+- Dataset Management命令：使用 `g_io_write_buf` + `memset`
+- 连接关闭时：只置 `conn->data_buffer = NULL`，不free
+- 命令完成时：只重置状态，不free
+
+共移除4处 `free(conn->data_buffer)` 调用。
+
+> **经验教训**: 预分配缓冲区和动态分配缓冲区不能混用，必须统一管理。free前必须确认指针是malloc分配的。
+
+---
+
+## 16. FTL初始化失败（旧NAND文件布局不兼容）
+
+### 现象
+
+NAND层mmap优化后，固件启动时FTL初始化失败：
+```
+[固件] 初始化 FTL 模块...
+[固件] FTL 模块初始化失败
+```
+
+### 根因
+
+`/tmp/nand_disk.bin` 是之前版本创建的，NAND页布局/OOB格式与新版本不兼容。
+NAND初始化时的恢复模式扫描OOB区域，错误地将所有块标记为 `BLOCK_USED`，
+导致 `ftl_find_next_free_block()` 找不到空闲块，FTL初始化返回 `RET_ERR_NO_SPACE`。
+
+### 解决方案
+
+删除旧的NAND持久化文件，让固件重新创建：
+```bash
+rm -f /tmp/nand_disk.bin /tmp/ftl_snapshot.bin /tmp/ftl_wal.log
+```
+
+> **经验教训**: NAND布局/格式变更后，必须删除旧的持久化文件，否则恢复模式会错误解析数据。

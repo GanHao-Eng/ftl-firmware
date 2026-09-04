@@ -25,7 +25,7 @@ SRC_DIR     = src
 MODULES_DIR = modules
 IPC_DIR     = ipc
 UTILS_DIR   = utils
-BUILD_DIR   = build
+BUILD_DIR   = /tmp/ftl-firmware-build
 TEST_DIR    = tests
 
 # 源文件

@@ -21,7 +21,9 @@
 #include "dma.h"
 #include "raid.h"
 #include "protocol/nvme_tcp_target.h"
-#include "protocol/nvme_controller.h"`r`n#include "protocol/ufs_target.h"`r`n#include "hal/os_abstract.h"
+#include "protocol/nvme_controller.h"
+#include "protocol/ufs_target.h"
+#include "hal/os_abstract.h"
 
 /* ============================================================
  *  全局配置
@@ -31,6 +33,16 @@
 #define FTL_SNAPSHOT_FILE  "ftl_snapshot.bin"
 
 
+
+/* ============================================================
+ *  任务函数前向声明（FreeRTOS 风格任务入口）
+ *  每个任务独立线程，通过消息队列通信，避免共享数据竞争
+ * ============================================================ */
+static void task_nvme_tcp_service(void *arg);    ///< NVMe/TCP 前端接口服务任务（高优先级）
+static void task_heartbeat_monitor(void *arg);     ///< 心跳与健康监控任务（普通优先级）
+static void task_ftl_unit_test(void *arg);         ///< FTL 单元测试任务（低优先级，后台验证）
+static void task_gc_benchmark(void *arg);          ///< GC 算法基准测试任务（低优先级，后台分析）
+static void task_status_monitor(void *arg);         ///< 任务状态监控任务（空闲优先级，调试用）
 /* ============================================================
  *  任务管理框架（FreeRTOS 风格）
  *
@@ -190,7 +202,7 @@ static const host_if_config_t g_default_host_config = {
  * @brief 固件主循环
  * @return 0 正常退出，-1 异常退出
  */
-static int firmware_main_loop(void)
+static int __attribute__((unused)) firmware_main_loop(void)
 {
     int result = 0;
     uint32_t loop_count = 0U;

@@ -962,8 +962,13 @@ BAR0 偏移 0x1000 处为 Doorbell 寄存器，每个队列占 8 字节（SQ Tai
 8. ~~**安全功能** - 加密、签名、安全擦除~~ ✅ 安全擦除已完成
 9. **RAID 支持** - RAID 级别的数据保护
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
+11. **SPDK 对接** - 将 FTL 层作为 SPDK Bdev 后端，通过 SPDK NVMe-oF/vhost 协议栈导出（规划中，详见 [docs/SPDK对接技术规划.md](docs/SPDK对接技术规划.md)）
 
 ## 版本历史
+
+### v2.4.1 (2026-09-08)
+- **新增 SPDK 对接技术规划文档**：详细规划 ftl-firmware 与 SPDK 的对接方案，选择将 FTL 层作为 SPDK Bdev 后端的架构，包含七阶段实施路线（库化→SPDK入门→适配层→Bdev模块→协议导出→性能测试→文档收尾）、五大技术难点解决方案、项目亮点与面试价值分析
+- 新增文件：docs/SPDK对接技术规划.md
 
 ### v2.4.0 (2026-09-08)
 - **QEMU vfio-user NVMe PCIe 后端**：实现完整 vfio-user 协议栈，模拟真实 PCIe NVMe 设备（256字节配置空间、64KB BAR0、MSI-X 中断、DMA 映射），与 QEMU vfio-user-pci 设备对接，虚拟机内标准 nvme.ko 驱动识别。通过 Unix socket 传输控制消息，SCM_RIGHTS 传递内存 FD，mmap 建立 GPA→HVA 映射，eventfd 触发 MSI-X 中断

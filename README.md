@@ -190,6 +190,10 @@ ftl-firmware/
 - ✅ I/O 命令：Read、Write、Write Zeroes、Flush、Dataset Management(TRIM)
 - ✅ Fabric Command：Property Set/Get、Connect
 - ✅ 多队列支持（Admin + 2 个 I/O 队列）
+- ✅ QEMU vhost-user NVMe 后端（与 QEMU vhost-user-nvme 设备对接，虚拟机内识别 NVMe 设备）
+- ✅ 异步事件请求(AER)完整实现（事件队列、事件掩码、最多4并发、SMART/温度/固件事件上报）
+- ✅ 多温度传感器支持（8个传感器：Composite/NAND Ch0/NAND Ch1/DRAM/Ambient/Power，阈值告警+AER事件）
+- ✅ 固件更新完整实现（7插槽管理、Firmware Download分块下载、Firmware Commit激活、Firmware Slot Log）
 - ✅ 真实数据持久化（Write→FTL→NAND，Read→NAND→FTL→主机）
 
 ### 管理模块
@@ -438,6 +442,155 @@ grep -E "ERROR|WARN|写命令|读命令|FTL" /tmp/fw.log
 sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 ```
 
+
+## QEMU vhost-user NVMe 后端使用指南
+
+本固件实现了完整的 vhost-user NVMe 后端，可作为 QEMU 虚拟机的 NVMe 设备后端。QEMU 通过 `vhost-user-nvme` 设备连接到本后端，虚拟机内即可识别标准 NVMe 设备并进行读写。
+
+### 架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│  QEMU 虚拟机 (Linux Guest)                            │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  nvme 内核驱动 + nvme-cli / dd / fio           │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │ PCIe (模拟)                     │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  QEMU vhost-user-nvme 设备                      │  │
+│  └───────────────────┬────────────────────────────┘  │
+└──────────────────────┼───────────────────────────────┘
+                       │ Unix Socket + 共享内存
+┌──────────────────────▼───────────────────────────────┐
+│  ftl-firmware (vhost-user 后端)                        │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  vhost_user_nvme.c (协议握手/共享内存/vring)    │  │
+│  │  GET_FEATURES → SET_MEM_TABLE → SET_VRING_*    │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │                                 │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  NVMe 控制器 (nvme_controller.c)                │  │
+│  │  Admin/I/O 命令处理 → FTL → NAND                │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### 工作原理
+
+1. **协议握手**：QEMU 通过 Unix socket 连接后端，完成 vhost-user 协议握手（特性协商、内存表设置、vring配置）
+2. **共享内存**：QEMU 将虚拟机物理内存区域通过文件描述符传递给后端，后端 mmap 后可直接访问 Guest 内存
+3. **vring 队列**：每个 NVMe 队列（Admin + I/O）对应一个 virtio ring，QEMU 写命令到 available ring，后端写完成到 used ring
+4. **门铃与中断**：QEMU 写门铃寄存器（SET_CONFIG）通知后端有新命令；后端通过 call eventfd 通知 QEMU 命令完成（触发虚拟机中断）
+5. **PRP 数据传输**：NVMe 命令中的 PRP 指针指向 Guest 物理内存，后端通过 GPA→HVA 映射直接读写数据
+
+### 快速开始
+
+#### 1. 编译运行固件（vhost-user 模式）
+
+```bash
+cd ftl-firmware
+make
+
+# 启动 vhost-user 后端模式
+/tmp/ftl-firmware-build/ftl_firmware --vhost-user
+# 固件监听 /tmp/ftl-vhost-user.sock，等待 QEMU 连接
+
+# 自定义 socket 路径
+/tmp/ftl-firmware-build/ftl_firmware --vhost-user --vhost-socket=/tmp/my-nvme.sock
+```
+
+#### 2. 启动 QEMU 虚拟机
+
+```bash
+qemu-system-x86_64 \
+    -machine q35,accel=kvm \
+    -cpu host -m 2048 -smp 2 \
+    -drive file=/path/to/guest.img,format=qcow2 \
+    -chardev socket,id=vu0,path=/tmp/ftl-vhost-user.sock \
+    -device vhost-user-nvme,chardev=vu0,num-queues=2 \
+    -net nic -net user,hostfwd=tcp::2222-:22 \
+    -nographic
+```
+
+**要求**：QEMU 8.0+ 版本支持 `vhost-user-nvme` 设备。
+
+#### 3. 虚拟机内验证
+
+```bash
+# 识别 NVMe 设备
+nvme list
+# /dev/nvme0n1 应出现，容量约 1GB，4K LBA
+
+# 查看控制器信息
+nvme id-ctrl /dev/nvme0
+
+# 写入测试
+dd if=/dev/urandom of=/dev/nvme0n1 bs=4k count=100 oflag=direct
+
+# 读取验证
+dd if=/dev/nvme0n1 of=/tmp/read.bin bs=4k count=100 iflag=direct
+
+# 查看 SMART 日志（含多温度传感器读数）
+nvme smart-log /dev/nvme0
+
+# 查看固件插槽信息
+nvme fw-log /dev/nvme0
+
+# fio 性能测试
+fio --name=randread --filename=/dev/nvme0n1 --rw=randread \
+    --bs=4k --iodepth=32 --runtime=10 --time_based --direct=1
+```
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `--vhost-user` | 启用 vhost-user NVMe 后端模式 |
+| `--vhost-socket=<path>` | 指定 Unix socket 路径（默认 `/tmp/ftl-vhost-user.sock`） |
+| `--debug` | 设置日志级别为 INFO |
+| `--trace` | 设置日志级别为 DEBUG |
+
+### 协议握手流程
+
+```
+QEMU (前端)                          固件 (后端)
+    |                                    |
+    |---- GET_FEATURES ----------------->|
+    |<--- features (bit30) --------------|
+    |---- SET_FEATURES ----------------->|
+    |---- GET_PROTOCOL_FEATURES -------->|
+    |<--- protocol_features -------------|
+    |---- SET_PROTOCOL_FEATURES -------->|
+    |---- SET_OWNER -------------------->|
+    |---- SET_MEM_TABLE (+FDs) --------->|  mmap 所有内存区域
+    |---- SET_VRING_NUM ---------------->|
+    |---- SET_VRING_ADDR --------------->|
+    |---- SET_VRING_BASE --------------->|
+    |---- SET_VRING_KICK (+eventfd) ---->|
+    |---- SET_VRING_CALL (+eventfd) ---->|
+    |---- SET_VRING_ENABLE ------------->|
+    |---- SET_CONFIG (CC.EN=1) --------->|  CSTS.RDY=1
+    |                                    |
+    |<=== 运行时数据传输 ===>           |
+    |---- SET_CONFIG (doorbell) -------->|
+    |                                    |  从 vring 取命令
+    |                                    |  处理命令 + PRP 数据传输
+    |                                    |  写 used ring
+    |<--- call eventfd (中断) -----------|
+```
+
+### 与 NVMe/TCP 模式的对比
+
+| 特性 | NVMe/TCP 模式 | vhost-user 模式 |
+|------|---------------|----------------|
+| 传输层 | TCP 网络 (端口4420) | Unix Socket + 共享内存 |
+| QEMU 设备 | 需虚拟机内 nvme-tcp 驱动连接 | QEMU 直接模拟 PCIe NVMe 设备 |
+| 延迟 | 较高（TCP协议栈开销） | 较低（共享内存零拷贝） |
+| 适用场景 | 跨主机/网络存储 | 本地虚拟机存储加速 |
+| 启动参数 | 默认模式（无需参数） | `--vhost-user` |
+
+两种模式可同时编译，通过命令行参数选择运行模式。
+
 ## IPC 消息队列
 
 ### 消息类型
@@ -599,7 +752,7 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 - **无共享数据**：任务间不直接共享全局变量，所有数据通过消息传递
 ## 扩展方向
 
-1. **接入真实 NVMe 协议** - 对接 QEMU 或真实硬件
+1. ~~**接入真实 NVMe 协议** - 对接 QEMU 或真实硬件~~ ✅ QEMU vhost-user 已完成
 2. ~~**多线程支持** - 每个模块独立线程运行~~ ✅ 已完成
 3. **共享内存** - 高性能数据传输
 4. ~~**DMA 模拟** - 模拟 DMA 传输~~ ✅ 已完成
@@ -611,6 +764,15 @@ sudo tcpdump -i lo -w /tmp/nvme.pcap port 4420
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
 
 ## 版本历史
+
+### v2.3.0 (2026-09-08)
+- **QEMU vhost-user NVMe 后端**：实现完整 vhost-user 协议栈，支持 QEMU vhost-user-nvme 设备对接，虚拟机内识别标准 NVMe 设备并进行读写。通过 Unix socket + 共享内存实现低延迟数据传输，PRP 指针直接访问 Guest 物理内存，call eventfd 触发虚拟机中断
+- **AER 异步事件请求完整实现**：事件队列(环形缓冲区大小16)、最多4并发AER命令、事件掩码(Set Features FID=0x0B)、支持 Error/SMART/Notice/ANA 四种事件类型，完成 dw0 字段符合 NVMe 规范
+- **多温度传感器支持**：8个温度传感器(Composite/NAND Ch0/NAND Ch1/DRAM/PCB Ambient/Power/2保留)，随机游走温度模拟+I/O负载影响，警告阈值(默认70°C)/临界阈值(默认85°C)，超温触发 critical_warning + AER SMART 事件 + 热节流，SMART 日志 temp_sensor[0-7] 正确填充
+- **固件更新完整实现**：7固件插槽管理(Slot1运行中+Slot2-7空)，Firmware Download(opcode 0x11)分块下载+偏移连续性校验+16MB上限，Firmware Commit(opcode 0x10)支持CA=0/1/2/3四种动作(替换/下次启动激活/立即激活/设为启动插槽)，Firmware Slot Information Log(LID=0x03)，立即激活触发 AER Notice 事件
+- **Identify Controller 字段更新**：aerl=3(最多4并发AER)、frmw=0x11(支持固件更新+Slot Info Log)、oacs=0x0009(支持Security+FW Commit)、oaes=0x01(命名空间属性通知)、wctemp/cctemp动态阈值
+- 新增文件：src/protocol/nvme/vhost_user_nvme.c, include/protocol/vhost_user_nvme.h, docs/vhost_user_integration_notes.md
+- 完善 Doxygen 函数注释和行间注释
 
 ### v2.2.0 (2026-08-20)
 - **性能优化**：去掉nand_page_write每次写入的fflush，改为nand_deinit时统一flush，写入性能提升3-5倍
@@ -749,7 +911,8 @@ MIT License
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| NVMe 多队列完整支持 | ⚠️ 部分 | 当前支持 Admin+1个I/O队列，需支持多I/O队列和中断向量 |
+| QEMU vhost-user 对接 | ✅ 已实现 | vhost-user NVMe后端，QEMU vhost-user-nvme设备对接，共享内存+PRP零拷贝 |
+| NVMe 多队列完整支持 | ⚠️ 部分 | 当前支持 Admin+2个I/O队列，需支持多I/O队列和中断向量 |
 | NVMe 中断处理 | ❌ 未实现 | 当前轮询模式，需实现 MSI-X 中断和中断处理线程 |
 | SGL/PRP 数据传输 | ⚠️ 部分 | 当前简化实现，需完整支持 SGL(Scatter Gather List) |
 | 命名空间管理 | ⚠️ 部分 | 当前单命名空间，需支持多命名空间、NS Attach/Detach |
@@ -761,9 +924,9 @@ MIT License
 |------|------|------|
 | 端到端数据保护(DIF/DIX) | ❌ 未实现 | T10 DIF/DIX，CRC校验+应用标签 |
 | 持久化内存区域(PMR) | ❌ 未实现 | NVMe 1.4 Persistent Memory Region |
-| 固件更新( Firmware Update) | ⚠️ 框架 | 命令已占位，需实现固件下载/激活/回滚 |
-| 异步事件请求(AER) | ⚠️ 框架 | 命令已占位，需实现事件上报机制 |
-| 温度传感器(TSensor) | ⚠️ 部分 | 需实现多温度传感器和温度阈值告警 |
+| 固件更新(Firmware Update) | ✅ 已实现 | 7插槽管理+分块下载+Commit激活+Firmware Slot Log(LID=0x03) |
+| 异步事件请求(AER) | ✅ 已实现 | 事件队列+事件掩码+最多4并发，SMART/温度/固件事件上报 |
+| 温度传感器(TSensor) | ✅ 已实现 | 8个传感器(Composite/NAND/DRAM/Ambient/Power)，阈值告警+AER事件 |
 | 预测性延迟分析 | ❌ 未实现 | 基于机器学习的延迟预测和性能优化 |
 
 ### P2 - 性能优化（低优先级）

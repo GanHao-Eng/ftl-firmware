@@ -25,6 +25,7 @@
 #include "protocol/nvme_controller.h"
 #include "protocol/ufs_target.h"
 #include "hal/os_abstract.h"
+#include "protocol/vhost_user_nvme.h"
 
 /* ============================================================
  *  全局配置
@@ -32,6 +33,12 @@
 
 /** @brief FTL 元数据快照文件路径（掉电保护持久化） */
 #define FTL_SNAPSHOT_FILE  "/tmp/ftl_snapshot.bin"
+
+/** @brief 是否启用 vhost-user NVMe 后端模式 */
+static bool g_vhost_user_enable = false;
+
+/** @brief vhost-user Unix socket 路径 */
+static char g_vhost_socket_path[256] = VHOST_USER_NVME_DEFAULT_SOCKET;
 
 
 
@@ -600,6 +607,24 @@ static ret_code_t init_all_modules(void)
     }
     printf("[固件] NVMe 控制器初始化完成\n\n");
 
+    /* 初始化 vhost-user NVMe 后端（如果启用） */
+    if (g_vhost_user_enable) {
+        printf("[固件] 初始化 vhost-user NVMe 后端...\n");
+        vhost_user_nvme_config_t vu_config;
+        memset(&vu_config, 0, sizeof(vu_config));
+        strncpy(vu_config.socket_path, g_vhost_socket_path, sizeof(vu_config.socket_path) - 1);
+        vu_config.max_queues = 2;
+        ret = vhost_user_nvme_init(&vu_config);
+        if (ret != RET_OK) {
+            printf("[固件] vhost-user NVMe 后端初始化失败\n");
+            host_if_deinit();
+            ftl_deinit();
+            nand_deinit();
+            return RET_ERR_INTERNAL;
+        }
+        printf("[固件] vhost-user NVMe 后端初始化完成，socket: %s\n\n", g_vhost_socket_path);
+    }
+
     /* 初始化 NVMe/TCP 目标端 */
     printf("[固件] 初始化 NVMe/TCP 目标端...\n");
     nvme_tcp_target_config_t tcp_config;
@@ -680,6 +705,13 @@ static void deinit_all_modules(void)
     printf("[固件] 反初始化 NVMe/TCP 目标端...\n");
     nvme_tcp_target_deinit();
     printf("[固件] NVMe/TCP 目标端反初始化完成\n\n");
+
+    /* 反初始化 vhost-user NVMe 后端（如果启用） */
+    if (g_vhost_user_enable) {
+        printf("[固件] 反初始化 vhost-user NVMe 后端...\n");
+        vhost_user_nvme_deinit();
+        printf("[固件] vhost-user NVMe 后端反初始化完成\n\n");
+    }
 
     /* 反初始化 FTL 模块前，保存元数据快照（掉电保护） */
     printf("[固件] 保存 FTL 元数据快照...\n");
@@ -1610,6 +1642,11 @@ int main(int argc, char *argv[])
             g_log_level = LOG_LEVEL_INFO;
         } else if (strcmp(argv[i], "--trace") == 0) {
             g_log_level = LOG_LEVEL_DEBUG;
+        } else if (strcmp(argv[i], "--vhost-user") == 0) {
+            g_vhost_user_enable = true;
+        } else if (strncmp(argv[i], "--vhost-socket=", 15) == 0) {
+            strncpy(g_vhost_socket_path, argv[i] + 15, sizeof(g_vhost_socket_path) - 1);
+            g_vhost_socket_path[sizeof(g_vhost_socket_path) - 1] = '\0';
         }
     }
 
@@ -1660,6 +1697,11 @@ int main(int argc, char *argv[])
         manager_process();
         host_if_process();
         nvme_tcp_target_process();
+
+        /* vhost-user NVMe 后端处理（如果启用） */
+        if (g_vhost_user_enable) {
+            vhost_user_nvme_process();
+        }
 
         /* 更新模块心跳（防止看门狗超时） */
         manager_send_heartbeat(MODULE_NAND);

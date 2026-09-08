@@ -80,9 +80,65 @@
 #define NVME_SC_ABORTED              0x0005U
 #define NVME_SC_INTERNAL_ERROR       0x0006U
 #define NVME_SC_CMD_ABORT_REQ        0x0007U
-#define NVME_SC_INVALID_NAMESPACE    0x000BU
+#define NVME_SC_INVALID_NAMESPACE    0x00BU
 #define NVME_SC_LBA_OUT_OF_RANGE     0x0009U
 #define NVME_SC_CAP_EXCEEDED         0x0008U
+#define NVME_SC_AER_LIMIT_EXCEEDED   0x0605U  ///< SCT=0x06(Path), SC=0x05
+#define NVME_SC_INVALID_FW_SLOT      0x0106U  ///< SCT=0x01(Cmd Specific), SC=0x06
+#define NVME_SC_INVALID_FW_IMAGE     0x0107U  ///< SCT=0x01(Cmd Specific), SC=0x07
+
+/* ============================================================
+ *  Feature Identifier (Set/Get Features)
+ * ============================================================ */
+#define NVME_FEAT_ARBITRATION        0x01U
+#define NVME_FEAT_POWER_MGMT         0x02U
+#define NVME_FEAT_LBA_RANGE          0x03U
+#define NVME_FEAT_TEMP_THRESHOLD     0x04U
+#define NVME_FEAT_ERROR_RECOVERY     0x05U
+#define NVME_FEAT_VOLATILE_WC        0x06U
+#define NVME_FEAT_NUM_QUEUES         0x07U
+#define NVME_FEAT_IRQ_CONF           0x08U
+#define NVME_FEAT_WRITE_ATOMIC       0x0AU
+#define NVME_FEAT_ASYNC_EVENT        0x0BU
+
+/* ============================================================
+ *  Log Page Identifier
+ * ============================================================ */
+#define NVME_LOG_ERROR_INFO          0x01U
+#define NVME_LOG_SMART_HEALTH        0x02U
+#define NVME_LOG_FW_SLOT_INFO        0x03U
+
+/* ============================================================
+ *  AER (Async Event Request) 常量
+ * ============================================================ */
+#define NVME_AER_MAX_PENDING         4U     ///< 最多并发 AER 数 (aerl+1)
+#define NVME_AER_QUEUE_SIZE          16U    ///< 事件队列大小
+#define NVME_AER_TYPE_ERROR_STATUS   0x0001U ///< 错误状态变化
+#define NVME_AER_TYPE_SMART_HEALTH   0x0002U ///< SMART/健康状态变化
+#define NVME_AER_TYPE_NOTICE         0x0003U ///< 通用通知
+#define NVME_AER_TYPE_ANA_CHANGE     0x0006U ///< ANA 变化
+#define NVME_AER_MASK_SPARE_LOW      0x01U  ///< 可用空间低事件掩码位
+#define NVME_AER_MASK_TEMP_THRESH    0x02U  ///< 温度阈值事件掩码位
+#define NVME_AER_MASK_RELIABILITY    0x04U  ///< 可靠性降级事件掩码位
+#define NVME_AER_MASK_READONLY       0x08U  ///< 只读事件掩码位
+#define NVME_AER_MASK_VOLATILE       0x10U  ///< 易失性内存备份失败掩码位
+
+/* ============================================================
+ *  温度传感器常量
+ * ============================================================ */
+#define NVME_TEMP_SENSOR_COUNT       8U     ///< 温度传感器数量
+#define NVME_TEMP_WARNING_DEFAULT    343U   ///< 默认警告阈值 70°C (Kelvin)
+#define NVME_TEMP_CRITICAL_DEFAULT   358U   ///< 默认临界阈值 85°C (Kelvin)
+
+/* ============================================================
+ *  固件更新常量
+ * ============================================================ */
+#define NVME_FW_SLOT_COUNT           7U     ///< 固件插槽数 (Slot 1-7)
+#define NVME_FW_MAX_IMAGE_SIZE       0x1000000U ///< 最大固件镜像 16MB
+#define NVME_FW_COMMIT_REPLACE       0x0U   ///< CA=0: 替换镜像
+#define NVME_FW_COMMIT_REPLACE_RESET 0x1U   ///< CA=1: 替换并下次复位激活
+#define NVME_FW_COMMIT_REPLACE_NOW   0x2U   ///< CA=2: 替换并立即激活
+#define NVME_FW_COMMIT_SET_BOOT      0x3U   ///< CA=3: 设置为下次启动插槽
 
 /* ============================================================
  *  数据结构定义
@@ -278,6 +334,30 @@ nvme_ctrl_regs_t *nvme_ctrl_get_regs(void);
  * @param len 缓冲区长度
  */
 void nvme_ctrl_fill_smart_log(uint8_t *buf, uint32_t len);
+
+/**
+ * @brief 填充 Firmware Slot Information 日志 (LID=0x03)
+ * @param buf 输出缓冲区
+ * @param len 缓冲区长度
+ */
+void nvme_ctrl_fill_fw_slot_log(uint8_t *buf, uint32_t len);
+
+/**
+ * @brief Post 一个 AER 异步事件
+ * @param event_type 事件类型 (NVME_AER_TYPE_*)
+ * @param event_info 事件信息（根据事件类型有不同含义）
+ * @param log_page 关联的日志页标识符
+ * @retval RET_OK 成功
+ * @retval RET_ERR_INTERNAL 事件队列已满
+ */
+ret_code_t nvme_ctrl_post_aer_event(uint32_t event_type, uint32_t event_info,
+                                     uint8_t log_page);
+
+/**
+ * @brief 更新温度传感器（基于 I/O 活动量和随机游走模型）
+ * @param io_activity I/O 活动量（0=空闲，值越大负载越高）
+ */
+void nvme_ctrl_update_temperature(uint32_t io_activity);
 
 /**
  * @brief 填充 Identify Namespace 数据

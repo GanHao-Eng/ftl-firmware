@@ -11,6 +11,13 @@ build/
 nand_disk.bin
 *.bin
 
+# 虚拟机镜像文件
+*.iso
+*.img
+*.qcow2
+*.vmdk
+*.vdi
+
 # 日志文件
 *.log
 ftl_wal.log

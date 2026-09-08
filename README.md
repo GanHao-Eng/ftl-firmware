@@ -191,6 +191,7 @@ ftl-firmware/
 - ✅ Fabric Command：Property Set/Get、Connect
 - ✅ 多队列支持（Admin + 2 个 I/O 队列）
 - ✅ QEMU vhost-user NVMe 后端（与 QEMU vhost-user-nvme 设备对接，虚拟机内识别 NVMe 设备）
+- ✅ QEMU vfio-user NVMe PCIe 后端（与 QEMU vfio-user-pci 设备对接，模拟完整 PCIe 设备：配置空间/BAR0/MSI-X/DMA，虚拟机内标准 nvme 驱动识别）
 - ✅ 异步事件请求(AER)完整实现（事件队列、事件掩码、最多4并发、SMART/温度/固件事件上报）
 - ✅ 多温度传感器支持（8个传感器：Composite/NAND Ch0/NAND Ch1/DRAM/Ambient/Power，阈值告警+AER事件）
 - ✅ 固件更新完整实现（7插槽管理、Firmware Download分块下载、Firmware Commit激活、Firmware Slot Log）
@@ -591,6 +592,205 @@ QEMU (前端)                          固件 (后端)
 
 两种模式可同时编译，通过命令行参数选择运行模式。
 
+## NVMe over PCIe (vfio-user) 使用指南
+
+本固件实现了 vfio-user NVMe PCIe 后端，可作为 QEMU 虚拟机的完整 PCIe NVMe 设备运行。与 vhost-user 基于 virtio 协议不同，vfio-user 模拟完整的 PCIe 设备（配置空间、BAR、MSI-X 中断、DMA），QEMU 通过 `vfio-user-pci` 设备连接本后端，虚拟机内使用标准 `nvme` 内核驱动即可识别为真实 PCIe NVMe 设备。
+
+### 架构概述
+
+**vfio-user 协议简介：**
+vfio-user 是 QEMU 提供的用户态 VFIO 后端协议，后端进程通过 Unix domain socket 与 QEMU 通信，模拟完整的 PCIe 设备。QEMU 将虚拟机对 PCIe 配置空间和 BAR 空间的读写转发为 vfio-user 消息，后端处理后回复；DMA 和中断通过共享内存和 eventfd 实现。
+
+**与 vhost-user 的区别：**
+- vfio-user 模拟完整 PCIe 设备（配置空间、BAR0、MSI-X、DMA），Guest 内加载标准 `nvme.ko` 驱动
+- vhost-user 基于 virtio 协议，QEMU 的 `vhost-user-nvme` 设备内部完成 virtio→NVMe 转换
+- vfio-user 更接近真实硬件行为，适合 PCIe 驱动开发、协议一致性测试和性能基准测试
+
+**与 NVMe/TCP 的区别：**
+- vfio-user 是本地 PCIe 总线级对接，通过 Unix socket + 共享内存通信，延迟最低
+- NVMe/TCP 是网络协议，通过 TCP/IP 栈传输，支持跨主机远程访问
+
+**三种对接方式对比：**
+
+| 维度 | NVMe/TCP | vhost-user | vfio-user |
+|------|----------|------------|-----------|
+| 协议层 | TCP/IP 网络协议 | virtio 协议 | PCIe 总线协议 |
+| 延迟 | 较高（网络栈） | 低（共享内存） | 最低（PCIe MMIO） |
+| 吞吐量 | 受网络带宽限制 | 高 | 最高 |
+| QEMU 设备 | 需 Guest 内 nvme-tcp 驱动 | `vhost-user-nvme` | `vfio-user-pci` |
+| 内核驱动依赖 | `nvme-tcp.ko` | `vhost` + `nvme` | `nvme.ko`（标准） |
+| 适用场景 | 网络存储、远程访问 | virtio 生态集成 | PCIe 设备模拟、驱动测试 |
+| 配置复杂度 | 中（需配置网络） | 中 | 低（socket 即可） |
+
+### 架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│  QEMU 虚拟机 (Linux Guest)                            │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  nvme 内核驱动 + nvme-cli / dd / fio           │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │ PCIe (配置空间/BAR0/MSI-X)      │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  QEMU vfio-user-pci 设备                        │  │
+│  └───────────────────┬────────────────────────────┘  │
+└──────────────────────┼───────────────────────────────┘
+                       │ Unix Socket (控制面)
+                       │ + 共享内存 (DMA 数据面)
+┌──────────────────────▼───────────────────────────────┐
+│  ftl-firmware (vfio-user 后端)                         │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  vfio_user_nvme.c (协议握手/PCIe模拟/MSI-X/DMA) │  │
+│  │  GET_API_VERSION → DEVICE_GET_INFO →           │  │
+│  │  DEVICE_GET_REGION_INFO → DMA_MAP →            │  │
+│  │  DEVICE_SET_IRQS → REGION_READ/WRITE           │  │
+│  └───────────────────┬────────────────────────────┘  │
+│                      │                                 │
+│  ┌───────────────────▼────────────────────────────┐  │
+│  │  NVMe 控制器 (nvme_controller.c)                │  │
+│  │  Admin/I/O 命令处理 → FTL → NAND                │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### 快速开始
+
+#### 1. 编译运行固件（vfio-user 模式）
+
+```bash
+cd ftl-firmware
+make
+
+# 启动 vfio-user 后端模式
+/tmp/ftl-firmware-build/ftl_firmware --vfio-user
+# 固件监听 /tmp/ftl-vfio-user.sock，等待 QEMU 连接
+
+# 自定义 socket 路径
+/tmp/ftl-firmware-build/ftl_firmware --vfio-user --vfio-socket=/tmp/my-nvme.sock
+```
+
+#### 2. 启动 QEMU 虚拟机
+
+```bash
+qemu-system-x86_64 \
+    -machine q35,accel=kvm \
+    -cpu host -m 2048 -smp 2 \
+    -drive file=/path/to/guest.img,format=qcow2 \
+    -chardev socket,id=vfio0,path=/tmp/ftl-vfio-user.sock \
+    -device vfio-user-pci,chardev=vfio0 \
+    -net nic -net user,hostfwd=tcp::2222-:22 \
+    -nographic
+```
+
+**参数说明：**
+- `-chardev socket,id=vfio0,path=...`：创建指向 vfio-user socket 的字符设备
+- `-device vfio-user-pci,chardev=vfio0`：创建 vfio-user PCIe 设备，QEMU 自动完成 PCIe 枚举
+- QEMU 需支持 `vfio-user-pci` 设备（较新版本）
+
+#### 3. 虚拟机内验证
+
+```bash
+# 1. 识别 PCIe NVMe 设备
+lspci -nn
+# 预期输出包含：
+# 00:04.0 Non-Volatile memory controller [0108]: Red Hat, Inc. Device [1b36:0010]
+
+# 2. 识别 NVMe 命名空间
+nvme list
+# /dev/nvme0n1 应出现，容量约 1GB，4K LBA
+
+# 3. 查看控制器信息
+nvme id-ctrl /dev/nvme0
+
+# 4. 写入测试
+dd if=/dev/urandom of=/dev/nvme0n1 bs=4k count=100 oflag=direct
+
+# 5. 读取验证
+dd if=/dev/nvme0n1 of=/tmp/read.bin bs=4k count=100 iflag=direct
+
+# 6. fio 性能测试
+fio --name=randread --filename=/dev/nvme0n1 --rw=randread \
+    --bs=4k --iodepth=32 --runtime=10 --time_based --direct=1
+```
+
+### PCIe 配置空间说明
+
+后端模拟完整的 PCIe Type 0 配置空间（256 字节），关键字段如下：
+
+| 偏移 | 字段 | 值 | 说明 |
+|------|------|-----|------|
+| 0x00 | Vendor ID | 0x1B36 | Red Hat |
+| 0x02 | Device ID | 0x0010 | NVMe 设备 |
+| 0x04 | Command | 0x0006 | IO Space + Memory Space enable |
+| 0x06 | Status | 0x0010 | Capabilities List |
+| 0x08 | Revision ID | 0x01 | 修订版本 |
+| 0x09 | Class Code | 0x010802 | Mass Storage / NVMe Controller |
+| 0x0C | Cache Line Size | 0x10 | 16 字节 |
+| 0x0E | Header Type | 0x00 | Type 0（普通设备） |
+| 0x10 | BAR0 (低32位) | 0xFFFF000C | 64-bit 内存空间，prefetchable，64KB |
+| 0x14 | BAR1 (高32位) | 0x00000000 | BAR0 高地址（32位地址空间内为0） |
+| 0x2C | Subsystem Vendor ID | 0x1B36 | 子系统厂商 ID |
+| 0x2E | Subsystem ID | 0x0010 | 子系统 ID |
+| 0x34 | Capability Pointer | 0x40 | MSI-X Capability 偏移 |
+| 0x40 | MSI-X Cap ID | 0x11 | MSI-X Capability 标识 |
+| 0x42 | MSI-X Msg Ctrl | 0x8000 | Enable=1, Table Size=0（1个向量） |
+| 0x44 | MSI-X Table Offset | 0x00002000 | BAR0 内偏移 0x2000 |
+| 0x48 | MSI-X PBA Offset | 0x00003000 | BAR0 内偏移 0x3000 |
+
+### BAR0 布局
+
+BAR0 为 64KB 64-bit prefetchable 内存空间，布局如下：
+
+```
+偏移        大小    用途
+0x0000      4KB     NVMe 控制器寄存器 (CAP, VS, CC, CSTS, AQA, ASQ, ACQ 等)
+0x1000      4KB     Doorbell 寄存器 (Admin + I/O 队列的 SQ 尾指针/CQ 头指针)
+0x2000      4KB     MSI-X 中断向量表 (每个向量16字节，当前1个向量)
+0x3000      4KB     MSI-X Pending Bit Array (PBA)
+0x4000      48KB    预留（未使用）
+```
+
+### NVMe 寄存器映射说明
+
+BAR0 偏移 0x0000 处为 NVMe 控制器寄存器（4KB），关键字段：
+
+| BAR0 偏移 | 寄存器 | 宽度 | 说明 |
+|-----------|--------|------|------|
+| 0x0000 | CAP | 64-bit | Controller Capabilities（队列深度、MPSMIN、AMS 等） |
+| 0x0008 | VS | 32-bit | Version（NVMe 1.4 = 0x00010400） |
+| 0x000C | INTMS | 32-bit | Interrupt Mask Set（传统中断掩码，MSI-X 模式下不使用） |
+| 0x0010 | INTMC | 32-bit | Interrupt Mask Clear |
+| 0x0014 | CC | 32-bit | Controller Configuration（EN、CSS、IOCQES、IOSQES 等） |
+| 0x001C | CSTS | 32-bit | Controller Status（RDY、CFS、SHST 等） |
+| 0x0020 | NSSR | 32-bit | NVM Subsystem Reset |
+| 0x0024 | AQA | 32-bit | Admin Queue Attributes（ASQS、ACQS） |
+| 0x0028 | ASQ | 64-bit | Admin SQ Base Address（Guest 物理地址） |
+| 0x0030 | ACQ | 64-bit | Admin CQ Base Address（Guest 物理地址） |
+
+BAR0 偏移 0x1000 处为 Doorbell 寄存器，每个队列占 8 字节（SQ Tail Doorbell 4 字节 + CQ Head Doorbell 4 字节）：
+- Admin 队列：0x1000 (SQyTDBL) / 0x1004 (CQyHDBL)
+- I/O 队列 1：0x1008 / 0x100C
+- I/O 队列 N：0x1000 + N×8 / 0x1004 + N×8
+
+### 与 vhost-user 的区别和适用场景
+
+| 维度 | vfio-user | vhost-user | NVMe/TCP |
+|------|-----------|------------|----------|
+| 设备模拟 | 完整 PCIe 设备（配置空间+BAR+MSI-X） | virtio 设备（vring+共享内存） | 网络目标端 |
+| Guest 驱动 | 标准 nvme.ko | nvme.ko（QEMU 内部转换） | nvme-tcp.ko |
+| 命令路径 | MMIO 写门铃 → SQ 读取 → 命令处理 | SET_CONFIG 门铃 → vring 取命令 | TCP PDU 解析 |
+| 中断方式 | MSI-X eventfd | call eventfd | TCP 响应 |
+| 适用场景 | PCIe 驱动开发、协议一致性测试、性能基准 | virtio 生态、与现有 virtio 工具链集成 | 网络存储、远程访问、跨主机 |
+
+### 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `--vfio-user` | 启用 vfio-user NVMe PCIe 后端模式 |
+| `--vfio-socket=<path>` | 指定 Unix socket 路径（默认 `/tmp/ftl-vfio-user.sock`） |
+| `--debug` | 设置日志级别为 INFO |
+| `--trace` | 设置日志级别为 DEBUG |
+
 ## IPC 消息队列
 
 ### 消息类型
@@ -756,7 +956,7 @@ QEMU (前端)                          固件 (后端)
 2. ~~**多线程支持** - 每个模块独立线程运行~~ ✅ 已完成
 3. **共享内存** - 高性能数据传输
 4. ~~**DMA 模拟** - 模拟 DMA 传输~~ ✅ 已完成
-5. **中断处理** - 模拟中断机制
+5. ~~**中断处理** - 模拟中断机制~~ ✅ vfio-user MSI-X 已实现
 6. ~~**温度管理** - 温度监控和热管理~~ ✅ 已完成
 7. ~~**电源管理** - 不同功耗状态管理~~ ✅ 已完成
 8. ~~**安全功能** - 加密、签名、安全擦除~~ ✅ 安全擦除已完成
@@ -764,6 +964,11 @@ QEMU (前端)                          固件 (后端)
 10. ~~**性能分析** - 性能监控和调优工具~~ ✅ 已完成
 
 ## 版本历史
+
+### v2.4.0 (2026-09-08)
+- **QEMU vfio-user NVMe PCIe 后端**：实现完整 vfio-user 协议栈，模拟真实 PCIe NVMe 设备（256字节配置空间、64KB BAR0、MSI-X 中断、DMA 映射），与 QEMU vfio-user-pci 设备对接，虚拟机内标准 nvme.ko 驱动识别。通过 Unix socket 传输控制消息，SCM_RIGHTS 传递内存 FD，mmap 建立 GPA→HVA 映射，eventfd 触发 MSI-X 中断
+- 新增文件：include/protocol/vfio_user_nvme.h, src/protocol/nvme/vfio_user_nvme.c, docs/vfio_user_design_notes.md
+- 完善 Doxygen 函数注释和行间注释
 
 ### v2.3.0 (2026-09-08)
 - **QEMU vhost-user NVMe 后端**：实现完整 vhost-user 协议栈，支持 QEMU vhost-user-nvme 设备对接，虚拟机内识别标准 NVMe 设备并进行读写。通过 Unix socket + 共享内存实现低延迟数据传输，PRP 指针直接访问 Guest 物理内存，call eventfd 触发虚拟机中断

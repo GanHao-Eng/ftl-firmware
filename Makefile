@@ -33,6 +33,7 @@ CORE_SRCS = $(SRC_DIR)/main.c \
             $(SRC_DIR)/protocol/nvme/nvme_controller.c \
             $(SRC_DIR)/protocol/nvme/nvme_tcp_target.c \
             $(SRC_DIR)/protocol/nvme/vhost_user_nvme.c \
+            $(SRC_DIR)/protocol/nvme/vfio_user_nvme.c \
             $(SRC_DIR)/protocol/ufs/ufs_target.c \
             $(SRC_DIR)/hal/os_linux.c \
             $(MODULES_DIR)/nand/nand.c \

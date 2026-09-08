@@ -26,6 +26,7 @@
 #include "protocol/ufs_target.h"
 #include "hal/os_abstract.h"
 #include "protocol/vhost_user_nvme.h"
+#include "protocol/vfio_user_nvme.h"
 
 /* ============================================================
  *  全局配置
@@ -39,6 +40,12 @@ static bool g_vhost_user_enable = false;
 
 /** @brief vhost-user Unix socket 路径 */
 static char g_vhost_socket_path[256] = VHOST_USER_NVME_DEFAULT_SOCKET;
+
+/** @brief 是否启用 vfio-user NVMe 后端模式 */
+static bool g_vfio_user_enable = false;
+
+/** @brief vfio-user Unix socket 路径 */
+static char g_vfio_socket_path[256] = VFIO_USER_NVME_DEFAULT_SOCKET;
 
 
 
@@ -625,6 +632,24 @@ static ret_code_t init_all_modules(void)
         printf("[固件] vhost-user NVMe 后端初始化完成，socket: %s\n\n", g_vhost_socket_path);
     }
 
+    /* 初始化 vfio-user NVMe 后端（如果启用） */
+    if (g_vfio_user_enable) {
+        printf("[固件] 初始化 vfio-user NVMe 后端...\n");
+        vfio_user_nvme_config_t vfio_config;
+        memset(&vfio_config, 0, sizeof(vfio_config));
+        strncpy(vfio_config.socket_path, g_vfio_socket_path, sizeof(vfio_config.socket_path) - 1);
+        vfio_config.max_queues = 2;
+        ret = vfio_user_nvme_init(&vfio_config);
+        if (ret != RET_OK) {
+            printf("[固件] vfio-user NVMe 后端初始化失败\n");
+            host_if_deinit();
+            ftl_deinit();
+            nand_deinit();
+            return RET_ERR_INTERNAL;
+        }
+        printf("[固件] vfio-user NVMe 后端初始化完成，socket: %s\n\n", g_vfio_socket_path);
+    }
+
     /* 初始化 NVMe/TCP 目标端 */
     printf("[固件] 初始化 NVMe/TCP 目标端...\n");
     nvme_tcp_target_config_t tcp_config;
@@ -711,6 +736,13 @@ static void deinit_all_modules(void)
         printf("[固件] 反初始化 vhost-user NVMe 后端...\n");
         vhost_user_nvme_deinit();
         printf("[固件] vhost-user NVMe 后端反初始化完成\n\n");
+    }
+
+    /* 反初始化 vfio-user NVMe 后端（如果启用） */
+    if (g_vfio_user_enable) {
+        printf("[固件] 反初始化 vfio-user NVMe 后端...\n");
+        vfio_user_nvme_deinit();
+        printf("[固件] vfio-user NVMe 后端反初始化完成\n\n");
     }
 
     /* 反初始化 FTL 模块前，保存元数据快照（掉电保护） */
@@ -1647,6 +1679,11 @@ int main(int argc, char *argv[])
         } else if (strncmp(argv[i], "--vhost-socket=", 15) == 0) {
             strncpy(g_vhost_socket_path, argv[i] + 15, sizeof(g_vhost_socket_path) - 1);
             g_vhost_socket_path[sizeof(g_vhost_socket_path) - 1] = '\0';
+        } else if (strcmp(argv[i], "--vfio-user") == 0) {
+            g_vfio_user_enable = true;
+        } else if (strncmp(argv[i], "--vfio-socket=", 14) == 0) {
+            strncpy(g_vfio_socket_path, argv[i] + 14, sizeof(g_vfio_socket_path) - 1);
+            g_vfio_socket_path[sizeof(g_vfio_socket_path) - 1] = '\0';
         }
     }
 
@@ -1701,6 +1738,11 @@ int main(int argc, char *argv[])
         /* vhost-user NVMe 后端处理（如果启用） */
         if (g_vhost_user_enable) {
             vhost_user_nvme_process();
+        }
+
+        /* vfio-user NVMe 后端处理（如果启用） */
+        if (g_vfio_user_enable) {
+            vfio_user_nvme_process();
         }
 
         /* 更新模块心跳（防止看门狗超时） */

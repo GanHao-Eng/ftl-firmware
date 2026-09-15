@@ -40,3 +40,6 @@ Thumbs.db
 # Git 相关
 *.orig
 *.rej
+
+# QEMU 源码包（大文件）
+qemu-vfio-user.zip

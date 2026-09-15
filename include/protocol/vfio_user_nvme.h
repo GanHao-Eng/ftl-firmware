@@ -78,20 +78,33 @@ extern "C" {
 /** @brief MSI-X 向量表条目大小（16字节） */
 #define VFIO_MSIX_TABLE_ENTRY_SIZE     16U
 
+/** @brief Region 索引：BAR0-BAR5（本版本 vfio.h 中 BAR 在前） */
+#define VFIO_REGION_BAR0               0U
+#define VFIO_REGION_BAR1               1U
+#define VFIO_REGION_BAR2               2U
+#define VFIO_REGION_BAR3               3U
+#define VFIO_REGION_BAR4               4U
+#define VFIO_REGION_BAR5               5U
+
+/** @brief Region 索引：ROM */
+#define VFIO_REGION_ROM                6U
+
 /** @brief Region 索引：PCI 配置空间 */
-#define VFIO_REGION_PCI_CONFIG         0U
+#define VFIO_REGION_PCI_CONFIG         7U
 
-/** @brief Region 索引：BAR0 */
-#define VFIO_REGION_BAR0               1U
+/** @brief Region 索引：VGA */
+#define VFIO_REGION_VGA                8U
 
-/** @brief Region 总数 */
-#define VFIO_REGION_COUNT              2U
+/** @brief Region 总数（标准 PCI 设备） */
+#define VFIO_REGION_COUNT              9U
 
-/** @brief IRQ 索引：MSI-X */
-#define VFIO_IRQ_MSIX                  0U
+/** @brief IRQ 索引：INTx, MSI, MSI-X（标准 VFIO 顺序） */
+#define VFIO_IRQ_INTX                  0U
+#define VFIO_IRQ_MSI                   1U
+#define VFIO_IRQ_MSIX                  2U
 
 /** @brief IRQ 总数 */
-#define VFIO_IRQ_COUNT                 1U
+#define VFIO_IRQ_COUNT                 3U
 
 /* ============================================================
  *  vfio-user 消息 ID
@@ -102,20 +115,22 @@ extern "C" {
  * @details 参考 QEMU 源码 include/hw/vfio/vfio-user.h
  */
 typedef enum {
-    VFU_GET_API_VERSION      = 1,   ///< 获取 API 版本
-    VFU_SET_RESET            = 2,   ///< 设置/触发设备复位
-    VFU_DMA_MAP              = 3,   ///< 映射 DMA 内存区域
-    VFU_DMA_UNMAP            = 4,   ///< 解除 DMA 内存映射
-    VFU_DEVICE_GET_INFO      = 5,   ///< 获取设备信息（region/irq 数）
-    VFU_DEVICE_GET_REGION_INFO = 6, ///< 获取 region 信息
-    VFU_DEVICE_GET_IRQ_INFO  = 7,   ///< 获取 IRQ 信息
-    VFU_DEVICE_SET_IRQS      = 8,   ///< 设置 IRQ（eventfd）
-    VFU_REGION_READ          = 9,   ///< 读 region（PCI config / BAR）
-    VFU_REGION_WRITE         = 10,  ///< 写 region（PCI config / BAR）
-    VFU_DMA_READ             = 11,  ///< 后端读 guest DMA 内存
-    VFU_DMA_WRITE            = 12,  ///< 后端写 guest DMA 内存
-    VFU_INTERRUPT            = 13,  ///< server→client 中断通知
-    VFU_MAX                  = 14   ///< 消息 ID 上限
+    VFU_VERSION                   = 1,
+    VFU_DMA_MAP                   = 2,
+    VFU_DMA_UNMAP                 = 3,
+    VFU_DEVICE_GET_INFO           = 4,
+    VFU_DEVICE_GET_REGION_INFO    = 5,
+    VFU_DEVICE_GET_REGION_IO_FDS  = 6,
+    VFU_DEVICE_GET_IRQ_INFO       = 7,
+    VFU_DEVICE_SET_IRQS           = 8,
+    VFU_REGION_READ               = 9,
+    VFU_REGION_WRITE              = 10,
+    VFU_DMA_READ                  = 11,
+    VFU_DMA_WRITE                 = 12,
+    VFU_DEVICE_RESET              = 13,
+    VFU_DIRTY_PAGES               = 14,
+    VFU_REGION_WRITE_MULTI        = 15,
+    VFU_MAX                       = 16
 } vfu_msg_id_t;
 
 /* ============================================================
@@ -123,7 +138,10 @@ typedef enum {
  * ============================================================ */
 
 /** @brief 消息需要回复 */
-#define VFU_MSG_FLAG_REPLY            (1U << 2)
+#define VFU_MSG_FLAG_REQUEST    0x0
+#define VFU_MSG_FLAG_REPLY      0x1
+#define VFU_MSG_FLAG_NO_REPLY   0x10
+#define VFU_MSG_FLAG_ERROR      0x20
 
 /* ============================================================
  *  IRQ 数据类型
@@ -213,51 +231,44 @@ typedef enum {
  *          支持通过 SCM_RIGHTS 辅助数据传递文件描述符。
  */
 typedef struct {
-    uint16_t msg_id;       ///< 消息 ID（vfu_msg_id_t）
-    uint16_t msg_version;  ///< 协议版本（0）
-    uint32_t msg_size;     ///< payload 字节数
-    uint32_t msg_flags;    ///< 消息标志
-    uint32_t msg_errno;    ///< 错误码（回复时使用，0=成功）
+    uint16_t id;
+    uint16_t command;
+    uint32_t size;
+    uint32_t flags;
+    uint32_t error_reply;
 } vfu_msg_hdr_t;
 
 /**
  * @brief VFU_DEVICE_GET_INFO 回复结构（24字节）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小
-    uint32_t flags;        ///< 标志
-    uint32_t num_regions;  ///< region 数量
-    uint32_t num_irqs;     ///< IRQ 数量
-    uint32_t flags_ext;    ///< 扩展标志
-    uint32_t reserved;     ///< 保留
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t num_regions;
+    uint32_t num_irqs;
+    uint32_t cap_offset;
 } vfu_device_info_t;
 
 /**
  * @brief VFU_DEVICE_GET_REGION_INFO 请求/回复结构（40字节）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小
-    uint32_t flags;        ///< 标志
-    uint32_t index;        ///< 请求时: region 索引
-    uint32_t cap_offset;   ///< capability 偏移
-    uint64_t size;         ///< region 大小
-    uint64_t offset;       ///< 在文件描述符中的偏移（mmap offset）
-    uint32_t type;         ///< region 类型
-    uint32_t subtype;      ///< region 子类型（BAR 编号）
-    uint32_t flags_ext;    ///< 扩展标志
-    uint32_t reserved;     ///< 保留
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t index;
+    uint32_t cap_offset;
+    uint64_t size;
+    uint64_t offset;
 } vfu_region_info_t;
 
 /**
  * @brief VFU_DEVICE_GET_IRQ_INFO 请求/回复结构（24字节）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小
-    uint32_t flags;        ///< 标志
-    uint32_t index;        ///< IRQ 索引
-    uint32_t count;        ///< 中断向量数
-    uint32_t flags_ext;    ///< 扩展标志
-    uint32_t reserved;     ///< 保留
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t index;
+    uint32_t count;
 } vfu_irq_info_t;
 
 /**
@@ -265,25 +276,22 @@ typedef struct {
  * @details data 字段携带 eventfd 数组（每个 eventfd 为 int，4字节）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小（含 data）
-    uint32_t flags;        ///< 标志
-    uint32_t index;        ///< IRQ 索引
-    uint32_t start;        ///< 起始向量
-    uint32_t count;        ///< 向量数
-    uint32_t data_type;    ///< 数据类型（EVENTFD=1, NONE=0）
-    uint8_t  data[1];      ///< eventfd 数组（变长）
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t index;
+    uint32_t start;
+    uint32_t count;
+    uint8_t  data[1];
 } vfu_set_irqs_t;
 
 /**
  * @brief VFU_REGION_READ/WRITE 请求结构（变长）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小（含 data）
-    uint32_t flags;        ///< 标志
-    uint32_t region_index; ///< region 索引
-    uint32_t count;        ///< 读写字节数
-    uint64_t offset;       ///< region 内偏移
-    uint8_t  data[1];      ///< 数据（变长，写时携带数据）
+    uint64_t offset;
+    uint32_t region;
+    uint32_t count;
+    uint8_t  data[1];
 } vfu_region_rw_t;
 
 /**
@@ -291,23 +299,21 @@ typedef struct {
  * @details 通过 SCM_RIGHTS 辅助数据传递内存文件描述符
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小
-    uint32_t flags;        ///< 标志
-    uint64_t vaddr;        ///< guest 物理地址
-    uint64_t size;         ///< 区域大小
-    uint64_t offset;       ///< mmap 偏移
-    uint32_t prot;         ///< 保护标志（PROT_READ/PROT_WRITE）
-    uint32_t reserved;     ///< 保留
+    uint32_t argsz;
+    uint32_t flags;
+    uint64_t offset;
+    uint64_t iova;
+    uint64_t size;
 } vfu_dma_map_t;
 
 /**
  * @brief VFU_DMA_UNMAP 请求结构（24字节）
  */
 typedef struct {
-    uint32_t argsz;        ///< 结构大小
-    uint32_t flags;        ///< 标志
-    uint64_t vaddr;        ///< guest 物理地址
-    uint64_t size;         ///< 区域大小
+    uint32_t argsz;
+    uint32_t flags;
+    uint64_t iova;
+    uint64_t size;
 } vfu_dma_unmap_t;
 
 /**

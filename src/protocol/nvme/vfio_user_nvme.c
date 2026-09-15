@@ -82,6 +82,8 @@ typedef struct {
 
 /** @brief 全局后端上下文 */
 static vfio_user_nvme_ctx_t g_ctx;
+static uint16_t g_current_req_id = 0;
+static uint16_t g_current_command = 0;
 
 /** @brief 队列状态数组（index 0 = Admin, 1+ = I/O） */
 static vfio_queue_state_t g_queues[VFIO_MAX_QUEUES];
@@ -122,7 +124,7 @@ static void *gpa_to_hva(uint64_t gpa)
     uint32_t i = 0;
 
     for (i = 0; i < g_ctx.dma_region_count; i++) {
-        uint64_t base = g_ctx.dma_regions[i].vaddr;
+        uint64_t base = g_ctx.dma_regions[i].iova;
         uint64_t size = g_ctx.dma_regions[i].size;
 
         if (gpa >= base && gpa < base + size) {
@@ -326,7 +328,7 @@ static ssize_t vfu_recv_msg(int fd, vfu_msg_hdr_t *hdr,
         }
     }
 
-    return n - (ssize_t)sizeof(vfu_msg_hdr_t);
+    return (ssize_t)hdr->size - (ssize_t)sizeof(vfu_msg_hdr_t);
 }
 
 /**
@@ -354,11 +356,11 @@ static ssize_t vfu_send_msg(int fd, uint16_t msg_id, uint32_t flags,
     ssize_t n = 0;
 
     memset(&hdr, 0, sizeof(hdr));
-    hdr.msg_id = msg_id;
-    hdr.msg_version = 0;
-    hdr.msg_size = size;
-    hdr.msg_flags = flags;
-    hdr.msg_errno = errno_val;
+    hdr.id = g_current_req_id;
+    hdr.command = g_current_command;
+    hdr.size = (uint32_t)sizeof(hdr) + size;
+    hdr.flags = flags;
+    hdr.error_reply = errno_val;
 
     memset(&msg, 0, sizeof(msg));
     memset(cmsgbuf, 0, sizeof(cmsgbuf));
@@ -385,6 +387,10 @@ static ssize_t vfu_send_msg(int fd, uint16_t msg_id, uint32_t flags,
     }
 
     n = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    if (n < 0) {
+        LOG_WARN("vfio-user: sendmsg failed cmd=%u size=%u errno=%d",
+                 g_current_command, hdr.size, errno);
+    }
     return n;
 }
 
@@ -590,15 +596,8 @@ static void trigger_msix_interrupt(void)
         }
     } else if (g_ctx.connected && g_ctx.conn_fd >= 0) {
         /* 回退：发送 VFU_INTERRUPT 消息 */
-        vfu_interrupt_t irq;
-        memset(&irq, 0, sizeof(irq));
-        irq.argsz = sizeof(irq);
-        irq.index = VFIO_IRQ_MSIX;
-        irq.start = 0;
-        irq.count = 1;
-        irq.data_type = VFU_IRQ_DATA_TYPE_NONE;
-        vfu_send_msg(g_ctx.conn_fd, VFU_INTERRUPT, 0, 0,
-                     &irq, sizeof(irq), NULL, 0);
+        /* IRQ via eventfd, no vfio-user message needed */
+        /* vfu_interrupt_t irq; ... */
     }
 }
 
@@ -1235,7 +1234,7 @@ static void pci_config_write(uint32_t offset, uint32_t count, const uint8_t *buf
  * ============================================================ */
 
 /**
- * @brief 处理 VFU_GET_API_VERSION
+ * @brief 处理 VFU_VERSION
  * @details 回复 vfio-user API 版本号（0）。
  */
 static void handle_get_api_version(void)
@@ -1243,12 +1242,12 @@ static void handle_get_api_version(void)
     uint32_t version = 0;
 
     LOG_INFO("vfio-user: GET_API_VERSION, version=%u", version);
-    vfu_send_reply(g_ctx.conn_fd, VFU_GET_API_VERSION,
+    vfu_send_reply(g_ctx.conn_fd, VFU_VERSION,
                    &version, sizeof(version));
 }
 
 /**
- * @brief 处理 VFU_SET_RESET
+ * @brief 处理 VFU_DEVICE_RESET
  * @details 复位设备状态：重置队列、寄存器和 PCI 配置空间。
  */
 static void handle_set_reset(void)
@@ -1265,7 +1264,7 @@ static void handle_set_reset(void)
     }
     g_ctx.msix_enabled = false;
 
-    vfu_send_reply(g_ctx.conn_fd, VFU_SET_RESET, NULL, 0);
+    vfu_send_reply(g_ctx.conn_fd, VFU_DEVICE_RESET, NULL, 0);
 }
 
 /**
@@ -1278,10 +1277,9 @@ static void handle_set_reset(void)
 static void handle_dma_map(const uint8_t *payload, int fd)
 {
     const vfu_dma_map_t *map = (const vfu_dma_map_t *)payload;
-    uint64_t vaddr = vfu_le64_to_cpu(map->vaddr);
+    uint64_t iova = vfu_le64_to_cpu(map->iova);
     uint64_t size = vfu_le64_to_cpu(map->size);
     uint64_t offset = vfu_le64_to_cpu(map->offset);
-    uint32_t prot = vfu_le32_to_cpu(map->prot);
     uint32_t idx = 0;
     void *addr = NULL;
 
@@ -1293,31 +1291,31 @@ static void handle_dma_map(const uint8_t *payload, int fd)
     }
 
     if (fd < 0) {
-        LOG_ERROR("vfio-user: DMA_MAP 缺少文件描述符");
-        vfu_send_error(g_ctx.conn_fd, VFU_DMA_MAP, EINVAL);
-        return;
+        LOG_WARN("vfio-user: DMA_MAP 无FD，使用匿名映射");
+        addr = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    } else {
+        addr = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, fd, (off_t)offset);
     }
-
-    addr = mmap(NULL, (size_t)size, (int)prot, MAP_SHARED, fd, (off_t)offset);
     if (addr == MAP_FAILED) {
-        LOG_ERROR("vfio-user: DMA mmap 失败, vaddr=0x%llX, size=%llu, errno=%d",
-                  (unsigned long long)vaddr, (unsigned long long)size, errno);
-        close(fd);
+        LOG_ERROR("vfio-user: DMA mmap 失败, iova=0x%llX, size=%llu, errno=%d",
+                  (unsigned long long)iova, (unsigned long long)size, errno);
+        if (fd >= 0) close(fd);
         vfu_send_error(g_ctx.conn_fd, VFU_DMA_MAP, errno);
         return;
     }
 
     idx = g_ctx.dma_region_count;
-    g_ctx.dma_regions[idx].vaddr = vaddr;
+    g_ctx.dma_regions[idx].iova = iova;
     g_ctx.dma_regions[idx].size = size;
     g_ctx.dma_regions[idx].offset = offset;
-    g_ctx.dma_regions[idx].prot = prot;
     g_ctx.dma_mappings[idx] = addr;
     g_ctx.dma_fds[idx] = fd;
     g_ctx.dma_region_count++;
 
     LOG_INFO("vfio-user: DMA_MAP[%u]: GPA=0x%llX size=%llu -> HVA=%p",
-             idx, (unsigned long long)vaddr, (unsigned long long)size, addr);
+             idx, (unsigned long long)iova, (unsigned long long)size, addr);
 
     vfu_send_reply(g_ctx.conn_fd, VFU_DMA_MAP, NULL, 0);
 }
@@ -1330,12 +1328,12 @@ static void handle_dma_map(const uint8_t *payload, int fd)
 static void handle_dma_unmap(const uint8_t *payload)
 {
     const vfu_dma_unmap_t *unmap = (const vfu_dma_unmap_t *)payload;
-    uint64_t vaddr = vfu_le64_to_cpu(unmap->vaddr);
+    uint64_t iova = vfu_le64_to_cpu(unmap->iova);
     uint64_t size = vfu_le64_to_cpu(unmap->size);
     uint32_t i = 0;
 
     for (i = 0; i < g_ctx.dma_region_count; i++) {
-        if (g_ctx.dma_regions[i].vaddr == vaddr &&
+        if (g_ctx.dma_regions[i].iova == iova &&
             g_ctx.dma_regions[i].size == size) {
             if (g_ctx.dma_mappings[i] != NULL) {
                 munmap(g_ctx.dma_mappings[i], (size_t)size);
@@ -1354,7 +1352,7 @@ static void handle_dma_unmap(const uint8_t *payload)
             }
             g_ctx.dma_region_count--;
             LOG_INFO("vfio-user: DMA_UNMAP: GPA=0x%llX size=%llu",
-                     (unsigned long long)vaddr, (unsigned long long)size);
+                     (unsigned long long)iova, (unsigned long long)size);
             break;
         }
     }
@@ -1373,10 +1371,10 @@ static void handle_device_get_info(void)
 
     memset(&info, 0, sizeof(info));
     info.argsz = (uint32_t)sizeof(info);
-    info.flags = 0;
+    info.flags = 0x2;  /* VFIO_DEVICE_FLAGS_PCI */
     info.num_regions = VFIO_REGION_COUNT;
     info.num_irqs = VFIO_IRQ_COUNT;
-    info.flags_ext = 0;
+    info.cap_offset = 0;
 
     LOG_INFO("vfio-user: DEVICE_GET_INFO, regions=%u, irqs=%u",
              info.num_regions, info.num_irqs);
@@ -1402,24 +1400,20 @@ static void handle_device_get_region_info(const uint8_t *payload)
     info.argsz = (uint32_t)sizeof(info);
     info.index = index;
 
-    if (index == VFIO_REGION_PCI_CONFIG) {
-        info.size = VFIO_PCI_CONFIG_SIZE;
-        info.offset = 0;
-        info.type = VFIO_REGION_TYPE_PCI_CONFIG;
-        info.subtype = 0;
-    } else if (index == VFIO_REGION_BAR0) {
+    if (index == VFIO_REGION_BAR0) {
         info.size = VFIO_BAR0_SIZE;
         info.offset = 0;
-        info.type = VFIO_REGION_TYPE_PCI_BAR;
-        info.subtype = 0;
+    } else if (index == VFIO_REGION_PCI_CONFIG) {
+        info.size = VFIO_PCI_CONFIG_SIZE;
+        info.offset = 0;
     } else {
-        LOG_WARN("vfio-user: 未知 region index=%u", index);
-        vfu_send_error(g_ctx.conn_fd, VFU_DEVICE_GET_REGION_INFO, EINVAL);
-        return;
+        /* BAR1-BAR5, ROM, VGA: 未使用，size=0 */
+        info.size = 0;
+        info.offset = 0;
     }
 
-    LOG_INFO("vfio-user: GET_REGION_INFO[%u]: size=%llu, type=%u",
-             index, (unsigned long long)info.size, info.type);
+    LOG_INFO("vfio-user: GET_REGION_INFO[%u]: size=%llu",
+             index, (unsigned long long)info.size);
 
     vfu_send_reply(g_ctx.conn_fd, VFU_DEVICE_GET_REGION_INFO,
                    &info, sizeof(info));
@@ -1440,7 +1434,11 @@ static void handle_device_get_irq_info(const uint8_t *payload)
     info.argsz = (uint32_t)sizeof(info);
     info.index = index;
 
-    if (index == VFIO_IRQ_MSIX) {
+    if (index == VFIO_IRQ_INTX) {
+        info.count = 1;  /* INTx 支持 1 个向量 */
+    } else if (index == VFIO_IRQ_MSI) {
+        info.count = 0;  /* 不支持 MSI */
+    } else if (index == VFIO_IRQ_MSIX) {
         info.count = VFIO_MSIX_VECTOR_COUNT;
     } else {
         info.count = 0;
@@ -1464,7 +1462,15 @@ static void handle_device_set_irqs(const uint8_t *payload, int fd)
 {
     const vfu_set_irqs_t *irqs = (const vfu_set_irqs_t *)payload;
     uint32_t index = vfu_le32_to_cpu(irqs->index);
-    uint32_t data_type = vfu_le32_to_cpu(irqs->data_type);
+    uint32_t irq_flags = vfu_le32_to_cpu(irqs->flags);
+    bool is_eventfd = (irq_flags & 0x4) != 0;
+
+    if (index == VFIO_IRQ_INTX || index == VFIO_IRQ_MSI) {
+        /* INTx/MSI 不支持，直接返回成功 */
+        if (fd >= 0) close(fd);
+        vfu_send_reply(g_ctx.conn_fd, VFU_DEVICE_SET_IRQS, NULL, 0);
+        return;
+    }
 
     if (index != VFIO_IRQ_MSIX) {
         LOG_WARN("vfio-user: SET_IRQS 未知 index=%u", index);
@@ -1479,7 +1485,7 @@ static void handle_device_set_irqs(const uint8_t *payload, int fd)
         g_ctx.msix_evtfd = -1;
     }
 
-    if (data_type == VFU_IRQ_DATA_TYPE_EVENTFD && fd >= 0) {
+    if (is_eventfd && fd >= 0) {
         g_ctx.msix_evtfd = fd;
         LOG_INFO("vfio-user: SET_IRQS MSI-X eventfd=%d", fd);
     } else {
@@ -1503,10 +1509,9 @@ static void handle_device_set_irqs(const uint8_t *payload, int fd)
 static void handle_region_read(const uint8_t *payload)
 {
     const vfu_region_rw_t *req = (const vfu_region_rw_t *)payload;
-    uint32_t region_index = vfu_le32_to_cpu(req->region_index);
+    uint32_t region_index = vfu_le32_to_cpu(req->region);
     uint64_t offset = vfu_le64_to_cpu(req->offset);
     uint32_t count = vfu_le32_to_cpu(req->count);
-    /* 回复缓冲区：固定头部 + 数据 */
     static uint8_t reply_buf[sizeof(vfu_region_rw_t) + VFIO_BAR0_SIZE];
     vfu_region_rw_t *reply = (vfu_region_rw_t *)reply_buf;
     uint32_t reply_size = 0;
@@ -1516,10 +1521,9 @@ static void handle_region_read(const uint8_t *payload)
     }
 
     memset(reply_buf, 0, sizeof(reply_buf));
-    reply->argsz = (uint32_t)sizeof(vfu_region_rw_t) + count;
-    reply->region_index = vfu_cpu_to_le32(region_index);
-    reply->count = vfu_cpu_to_le32(count);
     reply->offset = vfu_cpu_to_le64(offset);
+    reply->region = vfu_cpu_to_le32(region_index);
+    reply->count = vfu_cpu_to_le32(count);
 
     if (region_index == VFIO_REGION_PCI_CONFIG) {
         if (offset + count > VFIO_PCI_CONFIG_SIZE) {
@@ -1536,12 +1540,13 @@ static void handle_region_read(const uint8_t *payload)
     } else if (region_index == VFIO_REGION_BAR0) {
         bar0_read(offset, count, reply->data);
     } else {
-        LOG_WARN("vfio-user: REGION_READ 未知 region=%u", region_index);
-        vfu_send_error(g_ctx.conn_fd, VFU_REGION_READ, EINVAL);
-        return;
+        /* 其他 region：返回全 0 */
+        LOG_INFO("vfio-user: REGION_READ region=%u offset=%llu count=%u (zero)",
+                 region_index, (unsigned long long)offset, count);
     }
 
-    reply_size = (uint32_t)sizeof(vfu_region_rw_t) + count;
+    /* 回复包含完整的 region_rw 结构（offset+region+count+data） */
+    reply_size = 16U + count;  /* offsetof(vfu_region_rw_t, data) = 16 */
     vfu_send_reply(g_ctx.conn_fd, VFU_REGION_READ, reply_buf, reply_size);
 }
 
@@ -1555,7 +1560,7 @@ static void handle_region_read(const uint8_t *payload)
 static void handle_region_write(const uint8_t *payload)
 {
     const vfu_region_rw_t *req = (const vfu_region_rw_t *)payload;
-    uint32_t region_index = vfu_le32_to_cpu(req->region_index);
+    uint32_t region_index = vfu_le32_to_cpu(req->region);
     uint64_t offset = vfu_le64_to_cpu(req->offset);
     uint32_t count = vfu_le32_to_cpu(req->count);
 
@@ -1564,9 +1569,9 @@ static void handle_region_write(const uint8_t *payload)
     } else if (region_index == VFIO_REGION_BAR0) {
         bar0_write(offset, count, req->data);
     } else {
-        LOG_WARN("vfio-user: REGION_WRITE 未知 region=%u", region_index);
-        vfu_send_error(g_ctx.conn_fd, VFU_REGION_WRITE, EINVAL);
-        return;
+        /* 其他 region：忽略写入 */
+        LOG_INFO("vfio-user: REGION_WRITE region=%u offset=%llu count=%u (ignored)",
+                 region_index, (unsigned long long)offset, count);
     }
 
     vfu_send_reply(g_ctx.conn_fd, VFU_REGION_WRITE, NULL, 0);
@@ -1589,11 +1594,13 @@ static void dispatch_message(const vfu_msg_hdr_t *hdr,
 {
     int fd = (num_fds > 0) ? fds[0] : -1;
 
-    switch (hdr->msg_id) {
-    case VFU_GET_API_VERSION:
+    g_current_req_id = hdr->id;
+    g_current_command = hdr->command;
+    switch (hdr->command) {
+    case VFU_VERSION:
         handle_get_api_version();
         break;
-    case VFU_SET_RESET:
+    case VFU_DEVICE_RESET:
         handle_set_reset();
         break;
     case VFU_DMA_MAP:
@@ -1607,6 +1614,15 @@ static void dispatch_message(const vfu_msg_hdr_t *hdr,
         break;
     case VFU_DEVICE_GET_REGION_INFO:
         handle_device_get_region_info(payload);
+        break;
+    case VFU_DEVICE_GET_REGION_IO_FDS:
+        /* 不支持 mmap，返回 count=0（无 FD），QEMU 将通过 REGION_READ/WRITE 访问 */
+        {
+            struct { uint32_t argsz; uint32_t flags; uint32_t index; uint32_t count; } reply = {0};
+            reply.argsz = sizeof(reply);
+            reply.count = 0;
+            vfu_send_reply(g_ctx.conn_fd, VFU_DEVICE_GET_REGION_IO_FDS, &reply, sizeof(reply));
+        }
         break;
     case VFU_DEVICE_GET_IRQ_INFO:
         handle_device_get_irq_info(payload);
@@ -1624,11 +1640,11 @@ static void dispatch_message(const vfu_msg_hdr_t *hdr,
     case VFU_DMA_WRITE:
         /* 后端主动访问 guest 内存时使用，当前通过 mmap 直接访问，
          * 无需处理这两个消息 */
-        vfu_send_reply(g_ctx.conn_fd, hdr->msg_id, NULL, 0);
+        vfu_send_reply(g_ctx.conn_fd, hdr->command, NULL, 0);
         break;
     default:
-        LOG_WARN("vfio-user: 未处理的消息 ID=%u", hdr->msg_id);
-        vfu_send_error(g_ctx.conn_fd, hdr->msg_id, EINVAL);
+        LOG_WARN("vfio-user: 未处理的消息 ID=%u", hdr->command);
+        vfu_send_error(g_ctx.conn_fd, hdr->command, EINVAL);
         break;
     }
 }

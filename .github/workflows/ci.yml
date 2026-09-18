@@ -30,23 +30,23 @@ jobs:
 
     - name: Run FTL unit tests
       run: |
-        ./build/test_ftl_unit
+        /tmp/ftl-firmware-build/test_ftl_unit
 
     - name: Run GC benchmark
       run: |
-        ./build/test_gc_benchmark
+        /tmp/ftl-firmware-build/test_gc_benchmark
 
     - name: Run PLP recovery tests
       run: |
-        ./build/test_plp_recovery
+        /tmp/ftl-firmware-build/test_plp_recovery
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ftl-firmware-build
         path: |
-          build/ftl_firmware
-          build/test_ftl_unit
-          build/test_gc_benchmark
-          build/test_plp_recovery
+          /tmp/ftl-firmware-build/ftl_firmware
+          /tmp/ftl-firmware-build/test_ftl_unit
+          /tmp/ftl-firmware-build/test_gc_benchmark
+          /tmp/ftl-firmware-build/test_plp_recovery
         retention-days: 7

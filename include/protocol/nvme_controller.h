@@ -167,15 +167,21 @@ typedef struct {
 
 /**
  * @brief NVMe 完成队列项（16字节，Completion Queue Entry）
- * @details 按照 NVMe 1.4 规范定义
+ * @details 按照 NVMe 1.4 规范定义：
+ *          - bytes 0-3:  DW0 (命令特定返回值)
+ *          - bytes 4-7:  DW1 (保留)
+ *          - bytes 8-9:  DW2 low (SQ Head Pointer)
+ *          - bytes 10-11: DW2 high (vfio-user 模式下设为0；NVMe/TCP 和 vhost-user 用作 SQ ID)
+ *          - bytes 12-13: DW3 low (Command ID)
+ *          - bytes 14-15: DW3 high (Status Field, bit0=Phase Tag)
  */
 typedef struct {
     uint32_t dw0;           ///< DW0: 命令特定返回值 (bytes 0-3)
     uint32_t rsvd1;         ///< DW1: 保留 (bytes 4-7)
     uint16_t sqhd;          ///< DW2 low: SQ 头指针 (bytes 8-9)
-    uint16_t dw2_hi;        ///< DW2 high: bit0=Phase Tag, 其余保留 (bytes 10-11)
+    uint16_t sqid;          ///< DW2 high: SQ ID (bytes 10-11)，vfio-user 模式下设为0
     uint16_t cid;           ///< DW3 low: 命令 ID (bytes 12-13)
-    uint16_t status;        ///< DW3 high: 状态字段 SC/SCT (bytes 14-15)
+    uint16_t status;        ///< DW3 high: 状态字段 (bytes 14-15), bit0=Phase Tag
 } nvme_completion_t;
 
 /**

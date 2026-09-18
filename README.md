@@ -672,9 +672,12 @@ make
 #### 2. 启动 QEMU 虚拟机
 
 ```bash
+# 必须使用共享内存后端（memory-backend-file,share=on），否则 DMA 映射失败
 qemu-system-x86_64 \
     -machine q35,accel=kvm \
     -cpu host -m 2048 -smp 2 \
+    -object memory-backend-file,id=mem,size=2G,mem-path=/dev/shm,share=on \
+    -numa node,memdev=mem \
     -drive file=/path/to/guest.img,format=qcow2 \
     -chardev socket,id=vfio0,path=/tmp/ftl-vfio-user.sock \
     -device vfio-user-pci,chardev=vfio0 \
@@ -966,6 +969,14 @@ BAR0 偏移 0x1000 处为 Doorbell 寄存器，每个队列占 8 字节（SQ Tai
 
 ## 版本历史
 
+### v2.4.2 (2026-09-18)
+- **vfio-user PCIe 对接完整打通**：QEMU vfio-user-pci 设备成功识别 NVMe 控制器，/dev/nvme0n1 出现并完成读写验证（dd 读写 + cmp 数据一致性校验通过）
+- **PRP 列表遍历修复**：修复多页传输时 PRP2 非页对齐导致只写入前2页数据的 bug，只要传输超过2页就将 PRP2 当作列表指针处理，解决内核 hang 问题
+- **完成条目 Phase Tag 位置确认**：通过实验确认 Linux 内核 NVMe 驱动从 Status Field (bytes 14-15) bit0 读取 Phase Tag，删除了结构体中错误的 sqid 字段
+- **DMA 共享内存配置**：QEMU 必须使用 memory-backend-file,share=on 传递 Guest 内存 FD，后端 mmap 后直接访问
+- **新增调试文档**：docs/vfio_user_pcie_debug_guide.md，完整记录 vfio-user PCIe 对接过程中遇到的 20+ 个问题、根因分析和解决方案
+- 清理调试日志，完善代码注释
+
 ### v2.4.1 (2026-09-08)
 - **新增 SPDK 对接技术规划文档**：详细规划 ftl-firmware 与 SPDK 的对接方案，选择将 FTL 层作为 SPDK Bdev 后端的架构，包含七阶段实施路线（库化→SPDK入门→适配层→Bdev模块→协议导出→性能测试→文档收尾）、五大技术难点解决方案、项目亮点与面试价值分析
 - 新增文件：docs/SPDK对接技术规划.md
@@ -1123,8 +1134,8 @@ MIT License
 |------|------|------|
 | QEMU vhost-user 对接 | ✅ 已实现 | vhost-user NVMe后端，QEMU vhost-user-nvme设备对接，共享内存+PRP零拷贝 |
 | NVMe 多队列完整支持 | ⚠️ 部分 | 当前支持 Admin+2个I/O队列，需支持多I/O队列和中断向量 |
-| NVMe 中断处理 | ❌ 未实现 | 当前轮询模式，需实现 MSI-X 中断和中断处理线程 |
-| SGL/PRP 数据传输 | ⚠️ 部分 | 当前简化实现，需完整支持 SGL(Scatter Gather List) |
+| NVMe 中断处理 | ✅ 已实现 | vfio-user 模式 MSI-X eventfd 中断已打通 |
+| SGL/PRP 数据传输 | ⚠️ 部分 | PRP 完整支持（多页+列表遍历），SGL 禁用（强制 PRP） |
 | 命名空间管理 | ⚠️ 部分 | 当前单命名空间，需支持多命名空间、NS Attach/Detach |
 | 安全协议(TPer/SED) | ❌ 未实现 | 自加密驱动器支持，TCG Opal 协议 |
 

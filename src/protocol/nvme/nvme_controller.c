@@ -146,8 +146,12 @@ static char g_fw_current_version[8];     ///< 当前运行固件版本号
  */
 static void set_completion_status(nvme_completion_t *cpl, uint16_t status_code, bool phase)
 {
-    /* 状态字段：bit15=相位位，bit14-1=状态码，bit0=保留 */
-    cpl->status = (status_code << 1) | (phase ? 0x8000 : 0x0000);
+    /* NVMe 完成条目 status 字段格式：
+     * [15:14] 保留, [13:11] SCT, [10:9] 保留, [8:1] SC, [0] Phase Tag
+     * status_code 格式: 高8位=SCT, 低8位=SC，左移1位后对应 [13:11] 和 [8:1]
+     * 相位位由调用者（process_queue_commands）在 bit0 设置 */
+    (void)phase;  /* 相位位不在此设置 */
+    cpl->status = (status_code << 1);
 }
 
 /**
@@ -1762,8 +1766,9 @@ void nvme_ctrl_fill_identify_controller(uint8_t *buf, uint32_t len)
     /* AWUPF (bytes 528-529): Atomic Write Unit Power Fail */
     buf[528] = 0x00; buf[529] = 0x00;
 
-    /* SGLS (bytes 536-539): SGL Support (bit0=SGL支持, bit1=Fabrics SGL支持) */
-    buf[536] = 0x03; buf[537] = 0x00; buf[538] = 0x00; buf[539] = 0x00;
+    /* SGLS (bytes 536-539): SGL Support
+     * PCIe NVMe 使用 PRP，不支持 SGL，设为 0 */
+    buf[536] = 0x00; buf[537] = 0x00; buf[538] = 0x00; buf[539] = 0x00;
 
     /* SUBNQN (bytes 768-1023): NVM Subsystem NVMe Qualified Name (256字节) */
     memcpy(buf + 768, subnqn, strlen(subnqn));

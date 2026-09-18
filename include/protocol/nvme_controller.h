@@ -170,12 +170,12 @@ typedef struct {
  * @details 按照 NVMe 1.4 规范定义
  */
 typedef struct {
-    uint32_t dw0;           ///< 命令特定返回值
-    uint32_t rsvd1;         ///< 保留
-    uint16_t sqhd;          ///< SQ 头指针
-    uint16_t sqid;          ///< SQ ID
-    uint16_t cid;           ///< 命令 ID
-    uint16_t status;        ///< 状态字段（含相位位）
+    uint32_t dw0;           ///< DW0: 命令特定返回值 (bytes 0-3)
+    uint32_t rsvd1;         ///< DW1: 保留 (bytes 4-7)
+    uint16_t sqhd;          ///< DW2 low: SQ 头指针 (bytes 8-9)
+    uint16_t dw2_hi;        ///< DW2 high: bit0=Phase Tag, 其余保留 (bytes 10-11)
+    uint16_t cid;           ///< DW3 low: 命令 ID (bytes 12-13)
+    uint16_t status;        ///< DW3 high: 状态字段 SC/SCT (bytes 14-15)
 } nvme_completion_t;
 
 /**

@@ -84,6 +84,7 @@ typedef struct {
 static vfio_user_nvme_ctx_t g_ctx;
 static uint16_t g_current_req_id = 0;
 static uint16_t g_current_command = 0;
+static int g_current_no_reply = 0;
 
 /** @brief 队列状态数组（index 0 = Admin, 1+ = I/O） */
 static vfio_queue_state_t g_queues[VFIO_MAX_QUEUES];
@@ -123,6 +124,11 @@ static void *gpa_to_hva(uint64_t gpa)
 {
     uint32_t i = 0;
 
+    /* 快速拒绝明显无效的地址（未初始化内存模式） */
+    if (gpa == 0 || gpa == 0xCCCCCCCCCCCCCCCCULL || gpa > 0xFFFFFFFFULL) {
+        return NULL;
+    }
+
     for (i = 0; i < g_ctx.dma_region_count; i++) {
         uint64_t base = g_ctx.dma_regions[i].iova;
         uint64_t size = g_ctx.dma_regions[i].size;
@@ -156,6 +162,10 @@ static ret_code_t prp_read_data(uint64_t prp1, uint64_t prp2,
     uint64_t page_size = VFIO_PAGE_SIZE;
     uint64_t current_addr = prp1;
     uint32_t first_page_chunk = (uint32_t)(page_size - (prp1 & (page_size - 1)));
+    /* PRP2 是列表指针当且仅当传输超过2页 */
+    bool prp2_is_list = (len > first_page_chunk + (uint32_t)page_size) &&
+                        ((prp2 & (page_size - 1)) == 0);
+    uint32_t pages_done = 0;
 
     while (offset < len) {
         uint64_t page_offset = current_addr & (page_size - 1);
@@ -175,16 +185,15 @@ static ret_code_t prp_read_data(uint64_t prp1, uint64_t prp2,
 
         memcpy(buf + offset, (uint8_t *)hva + page_offset, chunk);
         offset += chunk;
+        pages_done++;
 
         if (offset >= len) {
             break;
         }
 
-        /* 判断下一页来源 */
-        if ((prp2 & (page_size - 1)) == 0 && offset > first_page_chunk) {
-            /* PRP2 是页对齐的 PRP 条目列表指针 */
+        if (prp2_is_list) {
             uint64_t *prp_list = (uint64_t *)gpa_to_hva(prp2);
-            uint32_t list_idx = 0;
+            uint32_t list_idx = pages_done - 1;
 
             if (prp_list == NULL) {
                 LOG_ERROR("vfio-user: PRP 列表地址转换失败, prp2=0x%llX",
@@ -192,14 +201,10 @@ static ret_code_t prp_read_data(uint64_t prp1, uint64_t prp2,
                 return RET_ERR_PARAM;
             }
 
-            /* 计算列表索引：已传输的完整页数 - 1（第一页由 PRP1 覆盖） */
-            list_idx = (offset - first_page_chunk) / (uint32_t)page_size;
             current_addr = vfu_le64_to_cpu(prp_list[list_idx]);
-        } else if (offset == first_page_chunk) {
-            /* 第一页结束，PRP2 直接是第二页地址（仅2页场景） */
+        } else if (pages_done == 1) {
             current_addr = prp2;
         } else {
-            /* PRP2 带页内偏移（仅2页场景），第二页后无更多数据 */
             break;
         }
     }
@@ -222,6 +227,10 @@ static ret_code_t prp_write_data(uint64_t prp1, uint64_t prp2,
     uint64_t page_size = VFIO_PAGE_SIZE;
     uint64_t current_addr = prp1;
     uint32_t first_page_chunk = (uint32_t)(page_size - (prp1 & (page_size - 1)));
+    /* PRP2 是列表指针当且仅当传输超过2页（第一页后还需>1页），
+     * 正好2页时 PRP2 直接是第2页地址 */
+    bool prp2_is_list = (len > first_page_chunk + (uint32_t)page_size);
+    uint32_t pages_done = 0;
 
     while (offset < len) {
         uint64_t page_offset = current_addr & (page_size - 1);
@@ -241,14 +250,15 @@ static ret_code_t prp_write_data(uint64_t prp1, uint64_t prp2,
 
         memcpy((uint8_t *)hva + page_offset, buf + offset, chunk);
         offset += chunk;
+        pages_done++;
 
         if (offset >= len) {
             break;
         }
 
-        if ((prp2 & (page_size - 1)) == 0 && offset > first_page_chunk) {
+        if (prp2_is_list) {
             uint64_t *prp_list = (uint64_t *)gpa_to_hva(prp2);
-            uint32_t list_idx = 0;
+            uint32_t list_idx = pages_done - 1;
 
             if (prp_list == NULL) {
                 LOG_ERROR("vfio-user: PRP 列表地址转换失败, prp2=0x%llX",
@@ -256,9 +266,8 @@ static ret_code_t prp_write_data(uint64_t prp1, uint64_t prp2,
                 return RET_ERR_PARAM;
             }
 
-            list_idx = (offset - first_page_chunk) / (uint32_t)page_size;
             current_addr = vfu_le64_to_cpu(prp_list[list_idx]);
-        } else if (offset == first_page_chunk) {
+        } else if (pages_done == 1) {
             current_addr = prp2;
         } else {
             break;
@@ -288,26 +297,26 @@ static ssize_t vfu_recv_msg(int fd, vfu_msg_hdr_t *hdr,
                             void *payload, int *fds, int max_fds)
 {
     struct msghdr msg;
-    struct iovec iov[2];
+    struct iovec iov;
     char cmsgbuf[CMSG_SPACE(sizeof(int) * VFIO_USER_MAX_DMA_REGIONS)];
     struct cmsghdr *cmsg = NULL;
     ssize_t n = 0;
+    ssize_t total = 0;
     int *fd_ptr = NULL;
     int fd_count = 0;
     int i = 0;
+    uint32_t payload_len = 0;
+    uint8_t *p = (uint8_t *)payload;
 
+    /* 第一步：只读取头部（16字节）+ 辅助数据（SCM_RIGHTS） */
     memset(&msg, 0, sizeof(msg));
     memset(cmsgbuf, 0, sizeof(cmsgbuf));
 
-    /* 先收头部（16字节） */
-    iov[0].iov_base = hdr;
-    iov[0].iov_len = sizeof(vfu_msg_hdr_t);
-    /* 再收 payload */
-    iov[1].iov_base = payload;
-    iov[1].iov_len = VFIO_USER_MAX_PAYLOAD_SIZE;
+    iov.iov_base = hdr;
+    iov.iov_len = sizeof(vfu_msg_hdr_t);
 
-    msg.msg_iov = iov;
-    msg.msg_iovlen = 2;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
     msg.msg_control = cmsgbuf;
     msg.msg_controllen = sizeof(cmsgbuf);
 
@@ -315,8 +324,19 @@ static ssize_t vfu_recv_msg(int fd, vfu_msg_hdr_t *hdr,
     if (n <= 0) {
         return -1;
     }
+    if (n < (ssize_t)sizeof(vfu_msg_hdr_t)) {
+        /* 头部不完整，继续读取剩余部分 */
+        uint8_t *hp = (uint8_t *)hdr + n;
+        ssize_t need = (ssize_t)sizeof(vfu_msg_hdr_t) - n;
+        while (need > 0) {
+            ssize_t r = recv(fd, hp, (size_t)need, 0);
+            if (r <= 0) return -1;
+            hp += r;
+            need -= r;
+        }
+    }
 
-    /* 提取文件描述符 */
+    /* 提取文件描述符（辅助数据随头部一起到达） */
     fd_count = 0;
     for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
@@ -328,7 +348,25 @@ static ssize_t vfu_recv_msg(int fd, vfu_msg_hdr_t *hdr,
         }
     }
 
-    return (ssize_t)hdr->size - (ssize_t)sizeof(vfu_msg_hdr_t);
+    /* 第二步：读取 exactly payload 大小的数据（避免粘包） */
+    if (hdr->size < sizeof(vfu_msg_hdr_t)) {
+        return -1;
+    }
+    payload_len = hdr->size - (uint32_t)sizeof(vfu_msg_hdr_t);
+    if (payload_len > VFIO_USER_MAX_PAYLOAD_SIZE) {
+        return -1;
+    }
+
+    total = 0;
+    while (total < (ssize_t)payload_len) {
+        n = recv(fd, p + total, (size_t)(payload_len - (uint32_t)total), 0);
+        if (n <= 0) {
+            return -1;
+        }
+        total += n;
+    }
+
+    return (ssize_t)payload_len;
 }
 
 /**
@@ -362,6 +400,11 @@ static ssize_t vfu_send_msg(int fd, uint16_t msg_id, uint32_t flags,
     hdr.flags = flags;
     hdr.error_reply = errno_val;
 
+    /* NO_REPLY 消息不发送回复 */
+    if (g_current_no_reply && (flags & VFU_MSG_FLAG_REPLY)) {
+        return 0;
+    }
+
     memset(&msg, 0, sizeof(msg));
     memset(cmsgbuf, 0, sizeof(cmsgbuf));
 
@@ -390,6 +433,9 @@ static ssize_t vfu_send_msg(int fd, uint16_t msg_id, uint32_t flags,
     if (n < 0) {
         LOG_WARN("vfio-user: sendmsg failed cmd=%u size=%u errno=%d",
                  g_current_command, hdr.size, errno);
+    } else {
+        LOG_WARN("vfio-user: SEND id=%u cmd=%u size=%u flags=0x%x",
+                 hdr.id, hdr.command, hdr.size, hdr.flags);
     }
     return n;
 }
@@ -515,8 +561,10 @@ static void init_nvme_regs(void)
     memset(g_ctx.nvme_regs, 0, VFIO_BAR0_NVME_REGS_SIZE);
 
     /* CAP (0x00): Controller Capabilities
-     * MQES=0x3FF(1023队列), DSTRD=0(4字节门铃), TO=0x0F, NSSRS=1 */
-    regs64[0] = 0x0000000F000001FFULL;
+     * MQES=0x3FF(1023队列), CQR=0, AMS=0, TO=0x0F(7.5秒超时),
+     * DSTRD=0(4字节门铃), NSSRS=1, CSS=0, MPSMIN=0, MPSMAX=0
+     * 高32位全0：不支持 PMRS/CMBS/BPS（避免驱动尝试分配 CMB 导致 ENOMEM） */
+    regs64[0] = 0x0000000002F003FFULL;
 
     /* VS (0x08): NVMe 1.4 */
     regs32[2] = NVME_VERSION;
@@ -631,7 +679,6 @@ static void process_nvme_command(const nvme_command_t *cmd,
 
     memset(cpl, 0, sizeof(nvme_completion_t));
     cpl->cid = vfu_cpu_to_le16(cid);
-    cpl->sqid = vfu_cpu_to_le16(qid);
 
     /* ---- Admin 命令（qid==0）---- */
     if (qid == 0) {
@@ -642,10 +689,21 @@ static void process_nvme_command(const nvme_command_t *cmd,
 
             memset(id_data, 0, sizeof(id_data));
             if (cns == 0x01) {
+                /* Identify Controller */
                 nvme_ctrl_fill_identify_controller(id_data, sizeof(id_data));
             } else if (cns == 0x00) {
+                /* Identify Namespace */
                 nvme_ctrl_fill_identify_namespace(id_data, sizeof(id_data),
                                                    vfu_le32_to_cpu(cmd->nsid));
+            } else if (cns == 0x02) {
+                /* Identify Active Namespace ID list: 返回 NSID=1 */
+                uint32_t nsid_list[1] = {vfu_cpu_to_le32(1)};
+                memcpy(id_data, nsid_list, sizeof(nsid_list));
+                LOG_INFO("vfio-user: Identify Active NS list, 返回 NSID=1");
+            } else if (cns == 0x10) {
+                /* Identify Allocated Namespace ID list: 返回 NSID=1 */
+                uint32_t nsid_list[1] = {vfu_cpu_to_le32(1)};
+                memcpy(id_data, nsid_list, sizeof(nsid_list));
             }
             prp_write_data(prp1, prp2, 4096, id_data);
             cpl->status = vfu_cpu_to_le16(0x0000);
@@ -740,8 +798,19 @@ static void process_nvme_command(const nvme_command_t *cmd,
         uint32_t transfer_len = nlb * VFIO_PAGE_SIZE;
         uint32_t i = 0;
 
+        LOG_WARN("vfio-user: IO READ slba=%llu nlb=%u len=%u prp1=0x%llX prp2=0x%llX",
+                 (unsigned long long)slba, nlb, transfer_len,
+                 (unsigned long long)prp1, (unsigned long long)prp2);
+
         if (transfer_len > VFIO_USER_NVME_MAX_IO_SIZE) {
             cpl->status = vfu_cpu_to_le16(NVME_SC_INTERNAL_ERROR);
+            break;
+        }
+
+        /* 检查 PRP2 有效性：多页传输需要有效 PRP2 */
+        if (transfer_len > VFIO_PAGE_SIZE && gpa_to_hva(prp2) == NULL) {
+            LOG_WARN("vfio-user: IO READ prp2 无效, 降级返回错误让驱动重试");
+            cpl->status = vfu_cpu_to_le16(NVME_SC_DATA_XFER_ERROR);
             break;
         }
 
@@ -751,8 +820,11 @@ static void process_nvme_command(const nvme_command_t *cmd,
                 memset(g_io_read_buf + i * VFIO_PAGE_SIZE, 0, VFIO_PAGE_SIZE);
             }
         }
-        prp_write_data(prp1, prp2, transfer_len, g_io_read_buf);
-        cpl->status = vfu_cpu_to_le16(NVME_SC_SUCCESS);
+        if (prp_write_data(prp1, prp2, transfer_len, g_io_read_buf) != RET_OK) {
+            cpl->status = vfu_cpu_to_le16(NVME_SC_DATA_XFER_ERROR);
+        } else {
+            cpl->status = vfu_cpu_to_le16(NVME_SC_SUCCESS);
+        }
         break;
     }
     case NVME_IO_WRITE: {
@@ -852,6 +924,8 @@ static void process_queue_commands(uint16_t qid)
     }
 
     q = &g_queues[qid];
+    LOG_WARN("vfio-user: process_queue qid=%u valid=%d sq_size=%u cq_size=%u sq_head=%u sq_tail=%u",
+             qid, q->valid, q->sq_size, q->cq_size, q->sq_head, q->sq_tail);
     if (!q->valid || q->sq_size == 0 || q->cq_size == 0) {
         return;
     }
@@ -859,8 +933,13 @@ static void process_queue_commands(uint16_t qid)
     /* 处理 SQ 中从 head 到 tail 的所有命令 */
     while (q->sq_head != q->sq_tail) {
         /* 从 guest 内存 SQ 读取命令（64字节） */
-        sq_entry = (nvme_command_t *)gpa_to_hva(
-            q->sq_base + (uint64_t)q->sq_head * sizeof(nvme_command_t));
+        uint64_t sq_addr = q->sq_base + (uint64_t)q->sq_head * sizeof(nvme_command_t);
+        sq_entry = (nvme_command_t *)gpa_to_hva(sq_addr);
+        LOG_WARN("vfio-user: SQ cmd addr=0x%llX entry=%p opcode=0x%02X prp1=0x%llX prp2=0x%llX",
+                 (unsigned long long)sq_addr, sq_entry,
+                 sq_entry ? sq_entry->opcode : 0xFF,
+                 sq_entry ? (unsigned long long)vfu_le64_to_cpu(sq_entry->dptr_prp1) : 0,
+                 sq_entry ? (unsigned long long)vfu_le64_to_cpu(sq_entry->dptr_prp2) : 0);
         if (sq_entry == NULL) {
             LOG_ERROR("vfio-user: SQ 命令地址转换失败, qid=%u, head=%u",
                       qid, q->sq_head);
@@ -882,7 +961,7 @@ static void process_queue_commands(uint16_t qid)
         /* 设置 SQ Head Pointer（当前命令的下一个位置） */
         cpl.sqhd = vfu_cpu_to_le16((uint16_t)((q->sq_head + 1U) % q->sq_size));
 
-        /* 设置相位位：status 的 bit0 为相位位 */
+        /* 设置相位位：status 字段的 bit0 为 Phase Tag */
         if (q->cq_phase) {
             cpl.status |= vfu_cpu_to_le16(0x0001U);
         } else {
@@ -891,6 +970,10 @@ static void process_queue_commands(uint16_t qid)
 
         memcpy(cq_entry, &cpl, sizeof(nvme_completion_t));
         wrote_completion = true;
+        LOG_WARN("vfio-user: CPL write qid=%u cq_tail=%u addr=0x%llX status=0x%04X sqhd=%u",
+                 qid, q->cq_tail,
+                 (unsigned long long)(q->cq_base + (uint64_t)q->cq_tail * sizeof(nvme_completion_t)),
+                 vfu_le16_to_cpu(cpl.status), vfu_le16_to_cpu(cpl.sqhd));
 
         /* 内存屏障：确保 CQ 写入对主机可见 */
         __sync_synchronize();
@@ -911,6 +994,8 @@ static void process_queue_commands(uint16_t qid)
 
     /* 有完成条目时触发中断 */
     if (wrote_completion) {
+        LOG_WARN("vfio-user: trigger IRQ qid=%u msix_enabled=%d evtfd=%d",
+                 qid, g_ctx.msix_enabled, g_ctx.msix_evtfd);
         trigger_msix_interrupt();
     }
 }
@@ -942,30 +1027,41 @@ static void handle_nvme_reg_write(uint32_t offset, uint32_t size, uint32_t value
     /* 同步到 nvme_controller 寄存器并处理特殊逻辑 */
     switch (offset) {
     case NVME_REG_CC: {
+        LOG_WARN("vfio-user: WRITE CC offset=0x%X value=0x%X", offset, value);
         if (ctrl_regs != NULL) {
             ctrl_regs->cc = value;
             if (value & 0x01U) {
-                /* CC.EN=1：使能控制器，设置 CSTS.RDY=1 */
+                /* CC.EN=1：使能控制器，设置 CSTS.RDY=1，重新同步队列配置 */
                 ctrl_regs->csts |= 0x01U;
                 g_ctx.nvme_regs[NVME_REG_CSTS] = 0x01U;
+                update_admin_queue_from_regs();
                 LOG_INFO("vfio-user: CC.EN=1, CSTS.RDY=1");
             } else {
-                /* CC.EN=0：复位控制器 */
+                /* CC.EN=0：清除就绪状态，但保留队列配置（AQA/ASQ/ACQ）
+                 * 驱动流程：先写 CC.EN=0 设置 CSS/MPS，再写 CC.EN=1 使能，
+                 * 期间不应清空已配置的队列 */
                 ctrl_regs->csts &= ~0x01U;
                 g_ctx.nvme_regs[NVME_REG_CSTS] = 0x00U;
-                reset_queue_state();
-                LOG_INFO("vfio-user: CC.EN=0, CSTS.RDY=0, 队列已复位");
+                /* 只重置队列指针，不清除大小和基地址 */
+                g_queues[0].sq_head = 0;
+                g_queues[0].sq_tail = 0;
+                g_queues[0].cq_head = 0;
+                g_queues[0].cq_tail = 0;
+                g_queues[0].cq_phase = true;
+                LOG_INFO("vfio-user: CC.EN=0, CSTS.RDY=0");
             }
         }
         break;
     }
     case NVME_REG_AQA:
+        LOG_WARN("vfio-user: WRITE AQA value=0x%X", value);
         if (ctrl_regs != NULL) {
             ctrl_regs->aqa = value;
             update_admin_queue_from_regs();
         }
         break;
     case NVME_REG_ASQ:
+        LOG_WARN("vfio-user: WRITE ASQ low value=0x%X", value);
         if (ctrl_regs != NULL) {
             /* ASQ 是64位，分高低32位写（QEMU 通常按32位写） */
             ctrl_regs->asq = (ctrl_regs->asq & ~0xFFFFFFFFULL) | value;
@@ -981,6 +1077,7 @@ static void handle_nvme_reg_write(uint32_t offset, uint32_t size, uint32_t value
         }
         break;
     case NVME_REG_ACQ:
+        LOG_WARN("vfio-user: WRITE ACQ low value=0x%X", value);
         if (ctrl_regs != NULL) {
             ctrl_regs->acq = (ctrl_regs->acq & ~0xFFFFFFFFULL) | value;
             update_admin_queue_from_regs();
@@ -1016,11 +1113,13 @@ static void handle_doorbell_write(uint32_t doorbell_offset, uint32_t value)
     if (is_sq) {
         /* SQ Tail Doorbell：更新 SQ 尾指针，触发命令处理 */
         g_queues[qid].sq_tail = (uint16_t)(value & 0xFFFFU);
+        LOG_WARN("vfio-user: SQ doorbell qid=%u tail=%u", qid, value & 0xFFFF);
         nvme_ctrl_sq_doorbell(qid, value);
         process_queue_commands(qid);
     } else {
         /* CQ Head Doorbell：更新 CQ 头指针（主机已消费完成） */
         g_queues[qid].cq_head = (uint16_t)(value & 0xFFFFU);
+        LOG_WARN("vfio-user: CQ doorbell qid=%u head=%u", qid, value & 0xFFFF);
         nvme_ctrl_cq_doorbell(qid, value);
     }
 }
@@ -1291,12 +1390,16 @@ static void handle_dma_map(const uint8_t *payload, int fd)
     }
 
     if (fd < 0) {
-        LOG_WARN("vfio-user: DMA_MAP 无FD，使用匿名映射");
+        LOG_WARN("vfio-user: DMA_MAP 无FD iova=0x%llX size=0x%llX offset=0x%llX",
+                 (unsigned long long)iova, (unsigned long long)size, (unsigned long long)offset);
         addr = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     } else {
         addr = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE,
                     MAP_SHARED, fd, (off_t)offset);
+        LOG_WARN("vfio-user: DMA_MAP 有FD iova=0x%llX size=0x%llX offset=0x%llX fd=%d addr=%p",
+                 (unsigned long long)iova, (unsigned long long)size,
+                 (unsigned long long)offset, fd, addr);
     }
     if (addr == MAP_FAILED) {
         LOG_ERROR("vfio-user: DMA mmap 失败, iova=0x%llX, size=%llu, errno=%d",
@@ -1520,6 +1623,9 @@ static void handle_region_read(const uint8_t *payload)
         count = VFIO_BAR0_SIZE;
     }
 
+    LOG_WARN("vfio-user: REGION_READ region=%u offset=0x%llX count=%u",
+             region_index, (unsigned long long)offset, count);
+
     memset(reply_buf, 0, sizeof(reply_buf));
     reply->offset = vfu_cpu_to_le64(offset);
     reply->region = vfu_cpu_to_le32(region_index);
@@ -1596,6 +1702,9 @@ static void dispatch_message(const vfu_msg_hdr_t *hdr,
 
     g_current_req_id = hdr->id;
     g_current_command = hdr->command;
+    g_current_no_reply = (hdr->flags & VFU_MSG_FLAG_NO_REPLY) ? 1 : 0;
+    LOG_WARN("vfio-user: RECV id=%u cmd=%u size=%u flags=0x%x fds=%d",
+             hdr->id, hdr->command, hdr->size, hdr->flags, num_fds);
     switch (hdr->command) {
     case VFU_VERSION:
         handle_get_api_version();

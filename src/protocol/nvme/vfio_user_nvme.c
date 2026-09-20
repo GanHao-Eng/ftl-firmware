@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file vfio_user_nvme.c
  * @brief vfio-user NVMe 后端完整实现
  * @details 实现 QEMU vfio-user 协议后端，使 ftl-firmware 可模拟一个
@@ -162,9 +162,10 @@ static ret_code_t prp_read_data(uint64_t prp1, uint64_t prp2,
     uint64_t page_size = VFIO_PAGE_SIZE;
     uint64_t current_addr = prp1;
     uint32_t first_page_chunk = (uint32_t)(page_size - (prp1 & (page_size - 1)));
-    /* PRP2 是列表指针当且仅当传输超过2页 */
-    bool prp2_is_list = (len > first_page_chunk + (uint32_t)page_size) &&
-                        ((prp2 & (page_size - 1)) == 0);
+    /* PRP2 是列表指针当且仅当传输超过2页（第一页后还需>1页），
+     * 正好2页时 PRP2 直接是第2页地址
+     * 注意：不要求 PRP2 页对齐，因为 Guest 分配的 PRP 列表可能不是页对齐的 */
+    bool prp2_is_list = (len > first_page_chunk + (uint32_t)page_size);
     uint32_t pages_done = 0;
 
     while (offset < len) {
@@ -392,6 +393,8 @@ static ssize_t vfu_send_msg(int fd, uint16_t msg_id, uint32_t flags,
     char cmsgbuf[CMSG_SPACE(sizeof(int) * VFIO_USER_MAX_DMA_REGIONS)];
     struct cmsghdr *cmsg = NULL;
     ssize_t n = 0;
+
+    (void)msg_id;  /* 预留参数：当前版本使用 g_current_req_id，后续可改为显式传参 */
 
     memset(&hdr, 0, sizeof(hdr));
     hdr.id = g_current_req_id;

@@ -35,17 +35,81 @@
 /** @brief FTL 元数据快照文件路径（掉电保护持久化） */
 #define FTL_SNAPSHOT_FILE  "/tmp/ftl_snapshot.bin"
 
-/** @brief 是否启用 vhost-user NVMe 后端模式 */
-static bool g_vhost_user_enable = false;
+/**
+ * @brief 主机接口类型枚举
+ */
+typedef enum {
+    HOST_IF_NONE = 0,
+    HOST_IF_NVME_TCP,      ///< NVMe/TCP 网络协议
+    HOST_IF_VFIO_USER,     ///< vfio-user PCIe 后端
+    HOST_IF_VHOST_USER,    ///< vhost-user NVMe 后端
+    HOST_IF_UFS,           ///< UFS SCSI 目标端
+    HOST_IF_INTERNAL,      ///< 内部命令队列（host_if 模块）
+} host_if_type_t;
 
-/** @brief vhost-user Unix socket 路径 */
-static char g_vhost_socket_path[256] = VHOST_USER_NVME_DEFAULT_SOCKET;
+/**
+ * @brief 主机接口操作回调表
+ * @details 每个主机接口注册 init/process/deinit 三个回调，
+ *          主循环统一遍历调用，实现接口与主循环解耦。
+ *          移植 FreeRTOS 时，每个接口可注册为独立任务。
+ */
+typedef struct host_if_ops {
+    host_if_type_t type;                    ///< 接口类型
+    const char    *name;                    ///< 接口名称（日志用）
+    bool           enabled;                 ///< 是否启用
+    ret_code_t   (*init)(void);             ///< 初始化函数
+    void         (*process)(void);          ///< 主循环处理函数
+    void         (*deinit)(void);           ///< 反初始化函数
+} host_if_ops_t;
 
-/** @brief 是否启用 vfio-user NVMe 后端模式 */
-static bool g_vfio_user_enable = false;
+/**
+ * @brief 固件全局运行时配置
+ */
+typedef struct {
+    bool enable_nvme_tcp;                   ///< 启用 NVMe/TCP
+    bool enable_vfio_user;                  ///< 启用 vfio-user PCIe
+    bool enable_vhost_user;                 ///< 启用 vhost-user
+    bool enable_ufs;                        ///< 启用 UFS
+    bool enable_internal;                   ///< 启用内部命令队列(host_if)
 
-/** @brief vfio-user Unix socket 路径 */
-static char g_vfio_socket_path[256] = VFIO_USER_NVME_DEFAULT_SOCKET;
+    char vfio_socket[256];                  ///< vfio-user socket 路径
+    char vhost_socket[256];                 ///< vhost-user socket 路径
+    uint16_t nvme_tcp_port;                 ///< NVMe/TCP 监听端口
+
+    bool enable_heartbeat_monitor;          ///< 启用心跳监控任务
+    bool enable_ftl_unit_test;              ///< 启用 FTL 单元测试任务
+    bool enable_gc_benchmark;              ///< 启用 GC 基准测试任务
+    bool enable_task_monitor;               ///< 启用任务状态监控任务
+
+    bool test_only;                         ///< 只运行测试不启动服务
+    bool no_snapshot;                       ///< 禁用快照保存
+} fw_runtime_config_t;
+
+/** @brief 全局运行时配置（默认值） */
+static fw_runtime_config_t g_config = {
+    .enable_nvme_tcp    = true,
+    .enable_vfio_user   = false,
+    .enable_vhost_user  = false,
+    .enable_ufs          = false,
+    .enable_internal    = false,
+    .vfio_socket        = "/tmp/ftl-vfio-user.sock",
+    .vhost_socket        = "/tmp/ftl-vhost-user.sock",
+    .nvme_tcp_port      = 4420,
+    .enable_heartbeat_monitor = true,
+    .enable_ftl_unit_test   = false,
+    .enable_gc_benchmark    = false,
+    .enable_task_monitor    = true,
+    .test_only              = false,
+    .no_snapshot            = false,
+};
+
+/** @brief 主机接口操作表（运行时动态注册，预留扩展接口）
+ *  @note  当前版本采用条件编译方式启用接口，注册表机制预留用于
+ *         后续支持动态加载/热插拔主机接口（如 USB、PCIe 切换等）
+ */
+#define MAX_HOST_IFS 6
+static host_if_ops_t g_host_ifs[MAX_HOST_IFS] __attribute__((unused));
+static int g_host_if_count __attribute__((unused)) = 0;
 
 
 
@@ -614,12 +678,12 @@ static ret_code_t init_all_modules(void)
     }
     printf("[固件] NVMe 控制器初始化完成\n\n");
 
-    /* 初始化 vhost-user NVMe 后端（如果启用） */
-    if (g_vhost_user_enable) {
+    /* 初始化 vhost-user NVMe 后端（根据配置决定） */
+    if (g_config.enable_vhost_user) {
         printf("[固件] 初始化 vhost-user NVMe 后端...\n");
         vhost_user_nvme_config_t vu_config;
         memset(&vu_config, 0, sizeof(vu_config));
-        strncpy(vu_config.socket_path, g_vhost_socket_path, sizeof(vu_config.socket_path) - 1);
+        strncpy(vu_config.socket_path, g_config.vhost_socket, sizeof(vu_config.socket_path) - 1);
         vu_config.max_queues = 2;
         ret = vhost_user_nvme_init(&vu_config);
         if (ret != RET_OK) {
@@ -629,15 +693,15 @@ static ret_code_t init_all_modules(void)
             nand_deinit();
             return RET_ERR_INTERNAL;
         }
-        printf("[固件] vhost-user NVMe 后端初始化完成，socket: %s\n\n", g_vhost_socket_path);
+        printf("[固件] vhost-user NVMe 后端初始化完成，socket: %s\n\n", g_config.vhost_socket);
     }
 
-    /* 初始化 vfio-user NVMe 后端（如果启用） */
-    if (g_vfio_user_enable) {
+    /* 初始化 vfio-user NVMe 后端（根据配置决定） */
+    if (g_config.enable_vfio_user) {
         printf("[固件] 初始化 vfio-user NVMe 后端...\n");
         vfio_user_nvme_config_t vfio_config;
         memset(&vfio_config, 0, sizeof(vfio_config));
-        strncpy(vfio_config.socket_path, g_vfio_socket_path, sizeof(vfio_config.socket_path) - 1);
+        strncpy(vfio_config.socket_path, g_config.vfio_socket, sizeof(vfio_config.socket_path) - 1);
         vfio_config.max_queues = 2;
         ret = vfio_user_nvme_init(&vfio_config);
         if (ret != RET_OK) {
@@ -647,42 +711,48 @@ static ret_code_t init_all_modules(void)
             nand_deinit();
             return RET_ERR_INTERNAL;
         }
-        printf("[固件] vfio-user NVMe 后端初始化完成，socket: %s\n\n", g_vfio_socket_path);
+        printf("[固件] vfio-user NVMe 后端初始化完成，socket: %s\n\n", g_config.vfio_socket);
     }
 
-    /* 初始化 NVMe/TCP 目标端 */
-    printf("[固件] 初始化 NVMe/TCP 目标端...\n");
-    nvme_tcp_target_config_t tcp_config;
-    memset(&tcp_config, 0, sizeof(tcp_config));
-    tcp_config.port = 4420;
-    tcp_config.subnqn = "nqn.2026-08.io.ftlfw:subsystem";
-    tcp_config.maxh2cdata = 65536;
-    ret = nvme_tcp_target_init(&tcp_config);
-    if (ret != RET_OK) {
-        printf("[固件] NVMe/TCP 目标端初始化失败\n");
-        host_if_deinit();
-        ftl_deinit();
-        nand_deinit();
-        return RET_ERR_INTERNAL;
-    }
-    printf("[固件] NVMe/TCP 目标端初始化完成，监听端口 %u\n\n", tcp_config.port);
-
-
-    /* 初始化 UFS 目标端（Universal Flash Storage）
-     * UFS 基于 SCSI 命令集，通过 UPIU 协议与主机通信
-     * 当前实现应用层和传输层框架，链路层/物理层由硬件实现 */
-    printf("[固件] 初始化 UFS 目标端...\n");
-    ret = ufs_target_init();
-    if (ret != RET_OK) {
-        printf("[固件] UFS 目标端初始化失败（非致命，继续运行）\n");
+    /* 初始化 NVMe/TCP 目标端（根据配置决定） */
+    if (g_config.enable_nvme_tcp) {
+        printf("[固件] 初始化 NVMe/TCP 目标端...\n");
+        nvme_tcp_target_config_t tcp_config;
+        memset(&tcp_config, 0, sizeof(tcp_config));
+        tcp_config.port = g_config.nvme_tcp_port;
+        tcp_config.subnqn = "nqn.2026-08.io.ftlfw:subsystem";
+        tcp_config.maxh2cdata = 65536;
+        ret = nvme_tcp_target_init(&tcp_config);
+        if (ret != RET_OK) {
+            printf("[固件] NVMe/TCP 目标端初始化失败\n");
+            host_if_deinit();
+            ftl_deinit();
+            nand_deinit();
+            return RET_ERR_INTERNAL;
+        }
+        printf("[固件] NVMe/TCP 目标端初始化完成，监听端口 %u\n\n", tcp_config.port);
     } else {
-        uint64_t total_sectors = 0;
-        uint32_t sector_size = 0;
-        ufs_target_get_capacity(&total_sectors, &sector_size);
-        printf("[固件] UFS 目标端初始化完成: 容量=%llu扇区, 扇区大小=%u字节\n",
-               (unsigned long long)total_sectors, sector_size);
+        printf("[固件] NVMe/TCP 目标端已禁用\n\n");
     }
-    printf("\n");
+
+
+    /* 初始化 UFS 目标端（根据配置决定） */
+    if (g_config.enable_ufs) {
+        printf("[固件] 初始化 UFS 目标端...\n");
+        ret = ufs_target_init();
+        if (ret != RET_OK) {
+            printf("[固件] UFS 目标端初始化失败（非致命，继续运行）\n");
+        } else {
+            uint64_t total_sectors = 0;
+            uint32_t sector_size = 0;
+            ufs_target_get_capacity(&total_sectors, &sector_size);
+            printf("[固件] UFS 目标端初始化完成: 容量=%llu扇区, 扇区大小=%u字节\n",
+                   (unsigned long long)total_sectors, sector_size);
+        }
+        printf("\n");
+    } else {
+        printf("[固件] UFS 目标端已禁用\n\n");
+    }
     /* 初始化管理模块 */
     printf("[固件] 初始化管理模块...\n");
     ret = manager_init(&g_default_fw_config);
@@ -732,14 +802,14 @@ static void deinit_all_modules(void)
     printf("[固件] NVMe/TCP 目标端反初始化完成\n\n");
 
     /* 反初始化 vhost-user NVMe 后端（如果启用） */
-    if (g_vhost_user_enable) {
+    if (g_config.enable_vhost_user) {
         printf("[固件] 反初始化 vhost-user NVMe 后端...\n");
         vhost_user_nvme_deinit();
         printf("[固件] vhost-user NVMe 后端反初始化完成\n\n");
     }
 
     /* 反初始化 vfio-user NVMe 后端（如果启用） */
-    if (g_vfio_user_enable) {
+    if (g_config.enable_vfio_user) {
         printf("[固件] 反初始化 vfio-user NVMe 后端...\n");
         vfio_user_nvme_deinit();
         printf("[固件] vfio-user NVMe 后端反初始化完成\n\n");
@@ -1675,15 +1745,53 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--trace") == 0) {
             g_log_level = LOG_LEVEL_DEBUG;
         } else if (strcmp(argv[i], "--vhost-user") == 0) {
-            g_vhost_user_enable = true;
+            g_config.enable_vhost_user = true;
         } else if (strncmp(argv[i], "--vhost-socket=", 15) == 0) {
-            strncpy(g_vhost_socket_path, argv[i] + 15, sizeof(g_vhost_socket_path) - 1);
-            g_vhost_socket_path[sizeof(g_vhost_socket_path) - 1] = '\0';
+            strncpy(g_config.vhost_socket, argv[i] + 15, sizeof(g_config.vhost_socket) - 1);
+            g_config.vhost_socket[sizeof(g_config.vhost_socket) - 1] = '\0';
         } else if (strcmp(argv[i], "--vfio-user") == 0) {
-            g_vfio_user_enable = true;
+            g_config.enable_vfio_user = true;
         } else if (strncmp(argv[i], "--vfio-socket=", 14) == 0) {
-            strncpy(g_vfio_socket_path, argv[i] + 14, sizeof(g_vfio_socket_path) - 1);
-            g_vfio_socket_path[sizeof(g_vfio_socket_path) - 1] = '\0';
+            strncpy(g_config.vfio_socket, argv[i] + 14, sizeof(g_config.vfio_socket) - 1);
+            g_config.vfio_socket[sizeof(g_config.vfio_socket) - 1] = '\0';
+        } else if (strcmp(argv[i], "--no-nvme-tcp") == 0) {
+            g_config.enable_nvme_tcp = false;
+        } else if (strncmp(argv[i], "--tcp-port=", 11) == 0) {
+            g_config.nvme_tcp_port = (uint16_t)atoi(argv[i] + 11);
+        } else if (strcmp(argv[i], "--ufs") == 0) {
+            g_config.enable_ufs = true;
+        } else if (strcmp(argv[i], "--internal") == 0) {
+            g_config.enable_internal = true;
+        } else if (strcmp(argv[i], "--no-test") == 0) {
+            g_config.enable_ftl_unit_test = false;
+            g_config.enable_gc_benchmark = false;
+        } else if (strcmp(argv[i], "--ftl-test") == 0) {
+            g_config.enable_ftl_unit_test = true;
+        } else if (strcmp(argv[i], "--gc-bench") == 0) {
+            g_config.enable_gc_benchmark = true;
+        } else if (strcmp(argv[i], "--no-heartbeat") == 0) {
+            g_config.enable_heartbeat_monitor = false;
+        } else if (strcmp(argv[i], "--no-snapshot") == 0) {
+            g_config.no_snapshot = true;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("FTL Firmware Usage:\n");
+            printf("  --vfio-user          启用 vfio-user PCIe 后端\n");
+            printf("  --vfio-socket=PATH   vfio-user socket 路径 (默认: /tmp/ftl-vfio-user.sock)\n");
+            printf("  --vhost-user         启用 vhost-user NVMe 后端\n");
+            printf("  --vhost-socket=PATH  vhost-user socket 路径\n");
+            printf("  --no-nvme-tcp        禁用 NVMe/TCP 服务\n");
+            printf("  --tcp-port=PORT      NVMe/TCP 监听端口 (默认: 4420)\n");
+            printf("  --ufs                启用 UFS 目标端\n");
+            printf("  --internal           启用内部命令队列(host_if)\n");
+            printf("  --ftl-test           启用 FTL 单元测试任务\n");
+            printf("  --gc-bench           启用 GC 基准测试任务\n");
+            printf("  --no-test            禁用所有测试任务\n");
+            printf("  --no-heartbeat       禁用心跳监控任务\n");
+            printf("  --no-snapshot        禁用掉电快照保存\n");
+            printf("  --debug               启用 INFO 日志\n");
+            printf("  --trace               启用 DEBUG 日志\n");
+            printf("  --help                显示此帮助\n");
+            return 0;
         }
     }
 
@@ -1703,6 +1811,17 @@ int main(int argc, char *argv[])
     printf("  最大错误数:   %u\n", g_default_fw_config.max_error_count);
     printf("  自动恢复:     %s\n", g_default_fw_config.auto_recovery ? "启用" : "禁用");
     printf("\n");
+    printf("主机接口:\n");
+    printf("  NVMe/TCP:     %s (port=%u)\n", g_config.enable_nvme_tcp ? "启用" : "禁用", g_config.nvme_tcp_port);
+    printf("  vfio-user:    %s (%s)\n", g_config.enable_vfio_user ? "启用" : "禁用", g_config.vfio_socket);
+    printf("  vhost-user:   %s (%s)\n", g_config.enable_vhost_user ? "启用" : "禁用", g_config.vhost_socket);
+    printf("  UFS:           %s\n", g_config.enable_ufs ? "启用" : "禁用");
+    printf("  Internal:     %s\n", g_config.enable_internal ? "启用" : "禁用");
+    printf("\n后台任务:\n");
+    printf("  Heartbeat:    %s\n", g_config.enable_heartbeat_monitor ? "启用" : "禁用");
+    printf("  FTL-Test:     %s\n", g_config.enable_ftl_unit_test ? "启用" : "禁用");
+    printf("  GC-Bench:     %s\n", g_config.enable_gc_benchmark ? "启用" : "禁用");
+    printf("  Snapshot:      %s\n\n", g_config.no_snapshot ? "禁用" : "启用");
 
     /* 初始化所有模块（含 UFS 协议栈） */
     ret = init_all_modules();
@@ -1715,11 +1834,19 @@ int main(int argc, char *argv[])
      *  任务注册（按优先级从高到低）
      * ============================================================ */
     printf("\n[固件] 注册系统任务...\n");
-    /* NVMe/TCP核心业务在主线程运行（确保最低延迟），不注册为独立任务 */
-    task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
-    task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-    task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
-    task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
+    /* 根据配置注册后台任务 */
+    if (g_config.enable_heartbeat_monitor) {
+        task_register("Heartbeat-Monitor", task_heartbeat_monitor, NULL, TASK_PRIORITY_NORMAL, 16 * 1024);
+    }
+    if (g_config.enable_ftl_unit_test) {
+        task_register("FTL-Unit-Test", task_ftl_unit_test, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    }
+    if (g_config.enable_gc_benchmark) {
+        task_register("GC-Benchmark", task_gc_benchmark, NULL, TASK_PRIORITY_LOW, 32 * 1024);
+    }
+    if (g_config.enable_task_monitor) {
+        task_register("Task-Monitor", task_status_monitor, NULL, TASK_PRIORITY_IDLE, 8 * 1024);
+    }
 
     uint32_t started = task_start_all();
     if (started == 0) {
@@ -1730,18 +1857,26 @@ int main(int argc, char *argv[])
     printf("[固件] 进入多任务运行模式（NVMe/TCP核心业务在主线程，辅助任务在子线程）...\n\n");
     uint32_t main_loop_count = 0;
     while (1) {
-        /* 核心业务：NVMe/TCP 前端接口处理（在主线程运行，确保最低延迟） */
+        /* 核心业务：管理器处理 */
         manager_process();
-        host_if_process();
-        nvme_tcp_target_process();
+
+        /* 内部命令队列处理（仅当启用时） */
+        if (g_config.enable_internal) {
+            host_if_process();
+        }
+
+        /* NVMe/TCP 处理（仅当启用时） */
+        if (g_config.enable_nvme_tcp) {
+            nvme_tcp_target_process();
+        }
 
         /* vhost-user NVMe 后端处理（如果启用） */
-        if (g_vhost_user_enable) {
+        if (g_config.enable_vhost_user) {
             vhost_user_nvme_process();
         }
 
         /* vfio-user NVMe 后端处理（如果启用） */
-        if (g_vfio_user_enable) {
+        if (g_config.enable_vfio_user) {
             vfio_user_nvme_process();
         }
 
@@ -1759,8 +1894,8 @@ int main(int argc, char *argv[])
             manager_print_module_status();
         }
 
-        /* 掉电保护：每5000次循环保存一次 FTL 元数据快照 */
-        if (main_loop_count % 5000U == 0U) {
+        /* 掉电保护：每5000次循环保存一次 FTL 元数据快照（如果启用） */
+        if (!g_config.no_snapshot && main_loop_count % 5000U == 0U) {
             ret_code_t snap_ret = ftl_save_snapshot(FTL_SNAPSHOT_FILE);
             if (snap_ret != RET_OK) {
                 LOG_WARN("FTL 快照保存失败: ret=%d", snap_ret);

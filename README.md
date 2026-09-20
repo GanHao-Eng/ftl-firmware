@@ -222,7 +222,10 @@ ftl-firmware/
 - ✅ 互斥锁（创建/销毁/加锁/解锁）
 - ✅ 时间管理（获取系统时间/延时）
 - ✅ 线程管理（创建/销毁）
-- ✅ Linux平台实现（基于POSIX pthread）
+- ✅ 消息队列（创建/发送/接收/销毁，支持超时）
+- ✅ 事件标志组（创建/置位/等待，支持任意/所有位等待）
+- ✅ 任务通知（轻量级事件通知机制）
+- ✅ Linux平台实现（基于POSIX pthread + 条件变量）
 - ✅ 预留FreeRTOS/RT-Thread/裸机扩展接口
 
 ### 性能监控
@@ -791,8 +794,36 @@ BAR0 偏移 0x1000 处为 Doorbell 寄存器，每个队列占 8 字节（SQ Tai
 |------|------|
 | `--vfio-user` | 启用 vfio-user NVMe PCIe 后端模式 |
 | `--vfio-socket=<path>` | 指定 Unix socket 路径（默认 `/tmp/ftl-vfio-user.sock`） |
+| `--vhost-user` | 启用 vhost-user NVMe 后端模式 |
+| `--vhost-socket=<path>` | 指定 vhost-user socket 路径 |
+| `--no-nvme-tcp` | 禁用 NVMe/TCP 服务 |
+| `--tcp-port=<port>` | 指定 NVMe/TCP 监听端口（默认 4420） |
+| `--ufs` | 启用 UFS 目标端 |
+| `--internal` | 启用内部命令队列（host_if 模块） |
+| `--ftl-test` | 启用 FTL 单元测试后台任务 |
+| `--gc-bench` | 启用 GC 基准测试后台任务 |
+| `--no-test` | 禁用所有后台测试任务 |
+| `--no-heartbeat` | 禁用心跳监控任务 |
+| `--no-snapshot` | 禁用掉电快照保存 |
 | `--debug` | 设置日志级别为 INFO |
 | `--trace` | 设置日志级别为 DEBUG |
+| `--help` | 显示完整帮助信息 |
+
+### 典型使用场景
+
+```bash
+# 最小化 vfio-user 模式（PCIe 调试用，不跑任何后台任务）
+./ftl_firmware --vfio-user --no-nvme-tcp --no-test --no-heartbeat
+
+# vfio-user + FTL 单元测试
+./ftl_firmware --vfio-user --no-nvme-tcp --ftl-test
+
+# 默认 NVMe/TCP 模式
+./ftl_firmware
+
+# 启用 UFS
+./ftl_firmware --ufs
+```
 
 ## IPC 消息队列
 
@@ -968,6 +999,15 @@ BAR0 偏移 0x1000 处为 Doorbell 寄存器，每个队列占 8 字节（SQ Tai
 11. **SPDK 对接** - 将 FTL 层作为 SPDK Bdev 后端，通过 SPDK NVMe-oF/vhost 协议栈导出（规划中，详见 [docs/SPDK对接技术规划.md](docs/SPDK对接技术规划.md)）
 
 ## 版本历史
+
+### v2.5.0 (2026-09-20)
+- **架构优化：主机接口按需启用**：新增统一运行时配置结构体 `fw_runtime_config_t`，所有主机接口（NVMe/TCP、vfio-user、vhost-user、UFS、Internal）可通过命令行参数独立启用/禁用，不再无条件初始化所有模块
+- **条件主循环**：主循环只调用已启用接口的 process 函数，vfio-user 模式下不再空转调用 `host_if_process()`
+- **条件任务注册**：后台任务（心跳监控、FTL单元测试、GC基准测试）可通过命令行参数独立启用/禁用
+- **OSAL 完善（FreeRTOS 移植就绪）**：新增消息队列 `os_queue_create/send/receive`、事件标志组 `os_event_group_set/wait`、任务通知 `os_task_notify/notify_wait`，Linux 平台基于 POSIX 实现，移植 FreeRTOS 只需替换底层实现
+- **PRP 读取 bug 修复**：修复 `prp_read_data()` 中多余的 PRP2 页对齐检查导致多页写入从第二页开始数据错误的问题，与 `prp_write_data()` 行为一致
+- **新增命令行参数**：`--no-nvme-tcp`、`--tcp-port`、`--ufs`、`--internal`、`--ftl-test`、`--gc-bench`、`--no-test`、`--no-heartbeat`、`--no-snapshot`、`--help`
+- 消除所有编译 warning
 
 ### v2.4.2 (2026-09-18)
 - **vfio-user PCIe 对接完整打通**：QEMU vfio-user-pci 设备成功识别 NVMe 控制器，/dev/nvme0n1 出现并完成读写验证（dd 读写 + cmp 数据一致性校验通过）
@@ -1165,7 +1205,7 @@ MIT License
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| FreeRTOS 移植 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现 FreeRTOS 平台层 |
+| FreeRTOS 移植 | ✅ 抽象层完整 | OSAL 已具备互斥锁/线程/消息队列/事件组/任务通知，只需实现 FreeRTOS 平台层 |
 | RT-Thread 移植 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现 RT-Thread 平台层 |
 | 裸机部署 | ⚠️ 抽象层就绪 | OSAL 已预留接口，需实现裸机调度器 |
 | FPGA 硬件加速 | ❌ 未实现 | ECC/CRC/加解密硬件加速，参考 Cosmos+ OpenSSD |

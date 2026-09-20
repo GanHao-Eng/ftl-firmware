@@ -132,4 +132,114 @@ os_platform_t os_get_platform(void);
  */
 const char *os_get_platform_name(void);
 
+/* ============================================================
+ *  消息队列抽象
+ * ============================================================ */
+
+/**
+ * @brief 消息队列句柄（不透明类型）
+ */
+typedef void *os_queue_t;
+
+/**
+ * @brief 创建消息队列
+ * @param[in] queue_length 队列长度（消息条数）
+ * @param[in] item_size 每条消息大小（字节）
+ * @return 队列句柄，失败返回NULL
+ */
+os_queue_t os_queue_create(uint32_t queue_length, uint32_t item_size);
+
+/**
+ * @brief 销毁消息队列
+ * @param[in] queue 队列句柄
+ */
+void os_queue_destroy(os_queue_t queue);
+
+/**
+ * @brief 向队列发送消息（阻塞）
+ * @param[in] queue 队列句柄
+ * @param[in] item 消息数据指针
+ * @param[in] timeout_ms 超时时间（毫秒），0表示不等待
+ * @retval RET_OK 成功
+ * @retval RET_ERR_TIMEOUT 超时
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t os_queue_send(os_queue_t queue, const void *item, uint32_t timeout_ms);
+
+/**
+ * @brief 从队列接收消息（阻塞）
+ * @param[in] queue 队列句柄
+ * @param[out] item 接收缓冲区指针
+ * @param[in] timeout_ms 超时时间（毫秒），0表示不等待
+ * @retval RET_OK 成功
+ * @retval RET_ERR_TIMEOUT 超时
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t os_queue_receive(os_queue_t queue, void *item, uint32_t timeout_ms);
+
+/* ============================================================
+ *  事件标志组抽象
+ * ============================================================ */
+
+/**
+ * @brief 事件标志组句柄（不透明类型）
+ */
+typedef void *os_event_group_t;
+
+/**
+ * @brief 创建事件标志组
+ * @return 事件组句柄，失败返回NULL
+ */
+os_event_group_t os_event_group_create(void);
+
+/**
+ * @brief 销毁事件标志组
+ * @param[in] event_group 事件组句柄
+ */
+void os_event_group_destroy(os_event_group_t event_group);
+
+/**
+ * @brief 设置事件标志位
+ * @param[in] event_group 事件组句柄
+ * @param[in] bits 要设置的位掩码
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t os_event_group_set(os_event_group_t event_group, uint32_t bits);
+
+/**
+ * @brief 等待事件标志位
+ * @param[in] event_group 事件组句柄
+ * @param[in] bits 要等待的位掩码
+ * @param[in] clear_on_exit 退出时是否清除标志
+ * @param[in] wait_for_all 是否等待所有位都置位
+ * @param[in] timeout_ms 超时时间（毫秒）
+ * @return 实际置位的标志位，0表示超时
+ */
+uint32_t os_event_group_wait(os_event_group_t event_group, uint32_t bits,
+                             bool clear_on_exit, bool wait_for_all,
+                             uint32_t timeout_ms);
+
+/* ============================================================
+ *  任务通知抽象（轻量级事件机制）
+ * ============================================================ */
+
+/**
+ * @brief 向指定任务发送通知
+ * @param[in] task_handle 任务句柄
+ * @param[in] value 通知值
+ * @retval RET_OK 成功
+ * @retval RET_ERR_PARAM 参数非法
+ */
+ret_code_t os_task_notify(os_thread_t task_handle, uint32_t value);
+
+/**
+ * @brief 等待任务通知
+ * @param[out] value 接收通知值的指针
+ * @param[in] timeout_ms 超时时间（毫秒）
+ * @retval RET_OK 成功
+ * @retval RET_ERR_TIMEOUT 超时
+ */
+ret_code_t os_task_notify_wait(uint32_t *value, uint32_t timeout_ms);
+
 #endif /* OS_ABSTRACT_H */
